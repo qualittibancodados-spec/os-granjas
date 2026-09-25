@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>OS Manutenção Granjas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:opsz,wght@6..12,400;6..12,600;6..12,700;6..12,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topo" hidden>
+  <div class="marca"><img id="logo" alt="" hidden><div><strong id="nomeSistema"></strong><span id="nomeEmpresa"></span></div></div>
+  <div class="quem"><span class="avatar" id="avatar"></span><span class="quem-txt"><strong id="quemNome"></strong><small id="quemPerfil"></small></span><button class="sair" id="btnSair" aria-label="Sair"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg><span>Sair</span></button></div>
+</header>
+<nav id="abas" hidden></nav>
+
+<main id="conteudo">
+  <section id="telaLogin" class="login" hidden>
+    <div class="login-marca">
+      <img id="logoLogin" alt="" hidden>
+      <h1 id="tituloLogin"></h1>
+      <p>Abertura e acompanhamento das ordens de serviço de manutenção dos núcleos.</p>
+      <ul class="login-pontos">
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg>Abra a OS direto da granja, pelo celular</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg>Acompanhe cada etapa do atendimento</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg>Histórico completo de cada serviço</li>
+      </ul>
+    </div>
+    <div class="login-lado">
+      <form id="formLogin" class="caixa-login">
+        <h2>Entrar</h2>
+        <p class="sub-login">Use o usuário e a senha fornecidos pelo administrador.</p>
+        <label>Usuário
+          <span class="campo-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+          <input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="ex.: joao.silva" required></span></label>
+        <label>Senha
+          <span class="campo-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+          <input name="senha" type="password" autocomplete="current-password" placeholder="Sua senha" required>
+          <button type="button" class="ver-senha" id="verSenha">Mostrar</button></span></label>
+        <p class="erro" id="erroLogin"></p>
+        <button class="btn primario" type="submit">Entrar</button>
+        <p class="login-rodape">Esqueceu a senha? Fale com o administrador do sistema.</p>
+      </form>
+    </div>
+  </section>
+  <section id="tela"></section>
+</main>
+
+<dialog id="modal"><div id="modalCorpo"></div></dialog>
+<div id="aviso" role="status" aria-live="polite"></div>
+
+<script src="config.js"></script>
+<script src="supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
