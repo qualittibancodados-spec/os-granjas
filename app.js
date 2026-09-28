@@ -52,6 +52,11 @@ const P = {
   coffee: '<path d="M10 2v2M14 2v2M6 2v2M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   dots: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  bell: '<path d="M10.27 21a2 2 0 0 0 3.46 0M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>',
+  file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4M10 9H8M16 13H8M16 17H8"/>',
+  camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  sheet: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
   battery: '<rect width="16" height="10" x="2" y="7" rx="2"/><path d="M22 11v2M6 11v2M10 11v2"/>',
 };
 const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${P[n] || ""}</svg>`;
@@ -109,6 +114,8 @@ function fmtMin(m) {
 }
 const idade = (ts) => fmtMin((Date.now() - new Date(ts)) / 6e4);
 const nomeU = (id) => (id && S.usuarios[id] ? S.usuarios[id].nome : "—");
+// avatar com foto (quando houver) ou iniciais
+const av = (id, cls = "") => { const u = S.usuarios[id]; return u?.foto ? `<span class="avatar ${cls}"><img src="${u.foto}" alt=""></span>` : `<span class="avatar ${cls}">${ini(u?.nome)}</span>`; };
 const ini = (n) => String(n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]).join("").toUpperCase();
 const nomeN = (id) => S.nucleoPorId[id]?.nome ?? "—";
 const local = (l) => { const v = [...(l || [])].sort((a, b) => a - b); return !v.length ? "Toda a granja" : v.length === 1 ? `Aviário ${v[0]}` : `Aviários ${v.join(", ")}`; };
@@ -194,6 +201,7 @@ function rotas() {
   r.push({ id: "ordens", rot: tem("tecnico") && !podeVerTudo() ? "Minhas OS" : tem("manutentor") && !podeVerTudo() ? "Histórico" : "Ordens", i: "list" });
   if (podeVerTudo()) r.push({ id: "painel", rot: "Painel", i: "chart" });
   if (tem("admin")) r.push({ id: "usuarios", rot: "Usuários", i: "users" });
+  if (podeVerTudo()) r.splice(r.findIndex((x) => x.id === "painel") + 1, 0, { id: "relatorios", rot: "Relatórios", i: "file" });
   if (tem("gerente") && !tem("gestor") && !tem("admin")) r.unshift(r.splice(r.findIndex((x) => x.id === "painel"), 1)[0]);
   return r;
 }
@@ -202,6 +210,7 @@ const TITULOS = {
   ordens: () => [tem("tecnico") && !podeVerTudo() ? "Minhas OS" : "Ordens de serviço", "Busque e acompanhe as OS"],
   painel: () => ["Painel", "Tempos, classificação, equipe e locais"],
   usuarios: () => ["Usuários", "Quem acessa o sistema e o que pode fazer"],
+  relatorios: () => ["Relatórios", "Resumo consolidado para exportar em PDF ou Excel"],
 };
 function ir(id) {
   S.rota = id; S.sel = null; S.tok++;
@@ -211,7 +220,7 @@ function ir(id) {
     <nav class="rail" aria-label="Menu">
       <div class="rail-logo"><img src="${C.LOGO}" alt="${esc(C.NOME_EMPRESA)}"></div>
       ${rotas().map((r) => `<a href="#" data-r="${r.id}" ${r.id === id ? 'aria-current="page"' : ""}>${ic(r.i)}${r.rot}<span class="dot" data-badge="${r.id}" hidden></span></a>`).join("")}
-      <div class="rail-bottom"><button class="avatar" id="btnPerfil" title="${esc(S.eu.nome)}">${ini(S.eu.nome)}</button></div>
+      <div class="rail-bottom"><button class="av-btn" id="btnPerfil" title="${esc(S.eu.nome)} — perfil">${av(S.eu.id)}</button></div>
     </nav>
     <div class="main">
       <header class="topbar">
@@ -219,8 +228,9 @@ function ir(id) {
         <div><h1>${t}</h1><div class="sub">${sub}</div></div>
         <div class="grow"></div>
         ${tem("tecnico") ? `<button class="btn btn-brand btn-sm desk-only" id="btnNovaTop">${ic("plus")}Nova OS</button>` : ""}
+        <button class="bell" id="btnAvisos" aria-label="Avisos">${ic("bell")}<span class="bell-n" id="bellN" hidden></span></button>
         <div class="who"><div class="txt"><b>${esc(S.eu.nome)}</b><small>${S.eu.perfis.map((p) => PERFIS[p].nome).join(" · ")}</small></div>
-          <button class="avatar mob-only" id="btnPerfilM">${ini(S.eu.nome)}</button></div>
+          <button class="av-btn mob-only" id="btnPerfilM">${av(S.eu.id)}</button></div>
       </header>
       <div id="view"></div>
     </div>
@@ -228,23 +238,132 @@ function ir(id) {
   $(".rail").onclick = (e) => { const a = e.target.closest("[data-r]"); if (a) { e.preventDefault(); ir(a.dataset.r); window.scrollTo(0, 0); } };
   $("#btnPerfil").onclick = $("#btnPerfilM").onclick = folhaPerfil;
   $("#btnNovaTop")?.addEventListener("click", novaOS);
-  ({ inicio: viewInicio, ordens: viewOrdens, painel: viewPainel, usuarios: viewUsuarios })[id]();
+  $("#btnAvisos").onclick = () => folhaAvisos();
+  ({ inicio: viewInicio, ordens: viewOrdens, painel: viewPainel, usuarios: viewUsuarios, relatorios: viewRelatorios })[id]();
   atualizarBadges();
 }
-async function atualizarBadges() {
-  // número vermelho no menu: o que depende de você
-  let n = 0;
-  if (tem("gestor")) { const { data } = await sb.from("ordens_servico").select("id").in("status", ["ABERTA", "PENDENTE DE ATENDIMENTO"]).range(0, 999); n += data.length; }
-  if (tem("tecnico")) { const { data } = await sb.from("ordens_servico").select("id").eq("solicitante_id", S.eu.id).eq("status", "AGUARDANDO CONFIRMAÇÃO").range(0, 999); n += data.length; }
-  if (tem("manutentor")) { const { data } = await sb.from("ordens_servico").select("id").eq("manutentor_id", S.eu.id).eq("status", "DIRECIONADA").range(0, 999); n += data.length; }
-  const b = $('[data-badge="inicio"]'); if (b) { b.hidden = !n; b.textContent = n; }
+/* ---------------- avisos (pendências de cada perfil) ---------------- */
+async function pendencias() {
+  const itens = [], q = () => sb.from("ordens_servico").select(CAMPOS);
+  const add = (o, tipo, titulo, texto, urg = false) => itens.push({ os: o?.id, tipo, titulo, texto, urg: urg || o?.prioridade === "EMERGENCIA", quando: o?.aberta_em, o });
+  if (tem("tecnico")) {
+    const { data } = await q().eq("solicitante_id", S.eu.id).eq("status", "AGUARDANDO CONFIRMAÇÃO").range(0, 199);
+    data.forEach((o) => add(o, "confirmar", `Confirme o serviço · ${osId(o.id)}`, `${o.descricao} — ${nomeU(o.manutentor_id)} finalizou.`));
+  }
+  if (tem("gestor")) {
+    const { data } = await q().in("status", ["ABERTA", "PENDENTE DE ATENDIMENTO"]).range(0, 499);
+    const ids = data.filter((o) => o.status === "PENDENTE DE ATENDIMENTO").map((o) => o.id);
+    const { data: at } = ids.length ? await sb.from("os_atendimentos").select("os_id,ciclo,resultado,motivo_recusa").in("os_id", ids) : { data: [] };
+    data.forEach((o) => {
+      const ult = at.filter((a) => a.os_id === o.id).sort((a, b) => b.ciclo - a.ciclo)[0];
+      if (o.status === "ABERTA") add(o, "direcionar", `Nova OS para direcionar · ${osId(o.id)}`, `${o.descricao} — ${nomeN(o.nucleo_id)}`);
+      else add(o, "devolvida", `${ult?.resultado === "RECUSADO" ? "Recusada pelo manutentor" : "Não resolvida"} · ${osId(o.id)}`, ult?.motivo_recusa ? `Motivo: ${ult.motivo_recusa}` : `${o.descricao} — direcione novamente.`);
+    });
+    const { data: ab } = await q().in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).range(0, 999);
+    ab.filter(pausaLonga).forEach((o) => add(o, "pausa", `Pausa longa · ${osId(o.id)}`, `${nomeU(o.manutentor_id)}: ${MOTIVOS[o.pausa_motivo].rot.toLowerCase()} há ${fmtMin(pausaMin(o))}.`));
+    const velhas = [...data, ...ab].filter((o) => (Date.now() - new Date(o.aberta_em)) / 36e5 > 72).length;
+    if (velhas) itens.push({ tipo: "paradas", titulo: `${velhas} OS abertas há mais de 3 dias`, texto: "Veja em Ordens → Em aberto.", grupo: "abertas" });
+  }
+  if (tem("manutentor")) {
+    const { data } = await q().eq("manutentor_id", S.eu.id).in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).range(0, 199);
+    data.filter((o) => o.status === "DIRECIONADA").forEach((o) => add(o, "atender", `${o.prioridade === "EMERGENCIA" ? "EMERGÊNCIA para atender" : "OS para atender"} · ${osId(o.id)}`, `${o.descricao} — ${nomeN(o.nucleo_id)} · ${localCurto(o.galpoes)}`));
+    data.filter(pausaLonga).forEach((o) => add(o, "pausa", `Retome ou finalize · ${osId(o.id)}`, `Pausada (${MOTIVOS[o.pausa_motivo].rot.toLowerCase()}) há ${fmtMin(pausaMin(o))}.`));
+  }
+  if ((tem("gerente") || tem("admin")) && !tem("gestor")) {
+    const { data } = await q().in("status", ABERTOS).range(0, 999);
+    data.filter((o) => o.prioridade === "EMERGENCIA").forEach((o) => add(o, "emergencia", `Emergência em aberto · ${osId(o.id)}`, `${o.descricao} — ${STATUS[o.status].rot.toLowerCase()}${o.manutentor_id ? ` com ${nomeU(o.manutentor_id)}` : ""}.`, true));
+    const muitoVelhas = data.filter((o) => (Date.now() - new Date(o.aberta_em)) / 36e5 > 168).length;
+    if (muitoVelhas) itens.push({ tipo: "paradas", titulo: `${muitoVelhas} OS abertas há mais de 7 dias`, texto: "Veja em Ordens → Em aberto.", grupo: "abertas", urg: true });
+  }
+  return itens.sort((a, b) => (b.urg - a.urg) || (new Date(a.quando || 0) - new Date(b.quando || 0)));
 }
+// Tarefas (precisam de ação) somem sozinhas quando feitas; informativos somem depois de vistos.
+const ACAO = ["confirmar", "direcionar", "devolvida", "atender"];
+const chaveAv = (x) => `${x.tipo}:${x.os ?? x.grupo}:${x.tipo === "paradas" ? x.titulo : x.o?.status || ""}`;
+const vistosKey = () => `osg_avisos_vistos_${S.eu?.id}`;
+const lerVistos = () => { try { return new Set(JSON.parse(localStorage.getItem(vistosKey()) || "[]")); } catch { return new Set(); } };
+const gravarVistos = (set) => { try { localStorage.setItem(vistosKey(), JSON.stringify([...set].slice(-400))); } catch {} };
+function marcarVistos(itens) { const v = lerVistos(); itens.forEach((x) => v.add(chaveAv(x))); gravarVistos(v); }
+async function atualizarBadges() {
+  const lst = await pendencias(), v = lerVistos();
+  lst.forEach((x) => { x.acao = ACAO.includes(x.tipo); x.visto = !x.acao && v.has(chaveAv(x)); });
+  S.avisos = lst;
+  const vis = lst.filter((x) => !x.visto), n = vis.length, urg = vis.some((x) => x.urg);
+  const bn = $("#bellN"); if (bn) { bn.hidden = !n; bn.textContent = n > 99 ? "99+" : n; bn.classList.toggle("urg", urg); }
+  const b = $('[data-badge="inicio"]'); if (b) { const t = lst.filter((x) => x.acao).length; b.hidden = !t; b.textContent = t; }
+  if (n && !S.avisou) { S.avisou = true; folhaAvisos(true); }
+}
+const TIPO_AV = { confirmar: ["checkc", "var(--s-aguardando)", "Confirmar"], direcionar: ["send", "var(--s-aberta)", "Direcionar"], devolvida: ["undo", "var(--s-pendente)", "Direcionar de novo"],
+  atender: ["tool", "var(--s-direcionada)", "Abrir"], pausa: ["pause", "#6A6E75"], paradas: ["clock", "var(--s-pendente)"], emergencia: ["alert", "var(--p-EMERGENCIA)"] };
+function folhaAvisos(auto = false) {
+  const lst = S.avisos || [], tarefas = lst.filter((x) => x.acao), info = lst.filter((x) => !x.acao && !x.visto), vistos = lst.filter((x) => x.visto);
+  const item = (x) => { const [icn, cor, rotAcao] = TIPO_AV[x.tipo], i = lst.indexOf(x);
+    return `<div class="aviso${x.urg ? " urg" : ""}${x.visto ? " visto" : ""}" style="--ac:${x.urg ? "var(--p-EMERGENCIA)" : cor}">
+      <span class="aviso-ic">${ic(x.urg && x.tipo !== "pausa" ? "alert" : icn)}</span>
+      <button class="aviso-tx" data-abrir="${i}"><b>${esc(x.titulo)}</b><small>${esc(x.texto)}</small>${x.quando ? `<em>${idade(x.quando)}</em>` : ""}</button>
+      ${x.acao ? `<button class="btn btn-sm btn-primary" data-fazer="${i}">${rotAcao}</button>` : x.visto ? "" : `<button class="btn btn-sm" data-visto="${i}" title="Marcar como visto">${ic("check")}Visto</button>`}
+    </div>`; };
+  const n = tarefas.length + info.length;
+  folha({
+    titulo: auto ? `Olá, ${esc(S.eu.nome.split(" ")[0])}! ${n === 1 ? "Você tem 1 aviso" : `Você tem ${n} avisos`}` : "Avisos",
+    sub: "Tarefas saem daqui sozinhas quando você as conclui. Informativos saem depois de vistos.",
+    corpo: (tarefas.length ? `<div class="av-grupo"><div class="av-h">${ic("flag")}Precisa de você <span>${tarefas.length}</span></div><div class="avisos">${tarefas.map(item).join("")}</div></div>` : "")
+      + (info.length ? `<div class="av-grupo"><div class="av-h">${ic("bell")}Para acompanhar <span>${info.length}</span><button class="linkish" id="todosVistos">Marcar todos como vistos</button></div><div class="avisos">${info.map(item).join("")}</div></div>` : "")
+      + (!n ? `<div class="av-vazio">${ic("checkc")}<b>Tudo em dia</b><small>Nenhuma tarefa ou aviso novo para você.</small></div>` : "")
+      + (vistos.length ? `<details class="av-vistos"><summary>Vistos (${vistos.length})</summary><div class="avisos">${vistos.map(item).join("")}</div></details>` : ""),
+    rodape: `<button class="btn btn-primary" data-fechar id="avOk">${auto ? "Entendi" : "Fechar"}</button>`,
+    aoAbrir: (el, fechar) => {
+      el.addEventListener("click", (e) => {
+        const abrir = e.target.closest("[data-abrir]"), fazer = e.target.closest("[data-fazer]"), visto = e.target.closest("[data-visto]");
+        if (visto) { const x = lst[+visto.dataset.visto]; marcarVistos([x]); x.visto = true; const d = visto.closest(".aviso"); d.classList.add("saindo"); setTimeout(() => d.remove(), 220); visto.remove(); atualizarBadges(); return; }
+        if (abrir || fazer) {
+          const it = lst[+(abrir?.dataset.abrir ?? fazer.dataset.fazer)]; if (!it.acao) marcarVistos([it]); fechar();
+          if (fazer && ["direcionar", "devolvida"].includes(it.tipo)) return executar("direcionar", it.os, fazer);
+          if (it.os) abrirOS(it.os); else if (it.grupo) { S.lista.grupo = it.grupo; ir("ordens"); }
+          atualizarBadges();
+        }
+      });
+      $("#todosVistos", el)?.addEventListener("click", () => { marcarVistos(info); fechar(); toast("Avisos marcados como vistos."); atualizarBadges(); });
+      // ao fechar pelo "Entendi" na abertura, os informativos contam como vistos
+      if (auto) $("#avOk", el).addEventListener("click", () => { marcarVistos(info); atualizarBadges(); });
+    },
+  });
+}
+
+// carrega bibliotecas só quando precisa (PDF/Excel)
+const scriptsCarregados = {};
+function carregarScript(src, pronto) {
+  if (pronto()) return Promise.resolve();
+  return (scriptsCarregados[src] ??= new Promise((ok, erro) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => erro(new Error("Não foi possível carregar " + src)); document.head.appendChild(s); }));
+}
+
 function folhaPerfil() {
   folha({
-    titulo: esc(S.eu.nome), sub: S.eu.perfis.map((p) => PERFIS[p].nome).join(" · "),
-    corpo: `<div class="checks">${S.eu.perfis.map((p) => `<label>${esc(PERFIS[p].nome)}<small>${PERFIS[p].faz}</small></label>`).join("")}</div>`,
+    titulo: "Seu perfil", sub: S.eu.perfis.map((p) => PERFIS[p].nome).join(" · "),
+    corpo: `<div class="perfil-top">${av(S.eu.id, "xl")}<div><b>${esc(S.eu.nome)}</b><small class="mono">${esc(S.eu.login)}</small>
+        <div class="acoes-foto"><label class="btn btn-sm">${ic("camera")}${S.usuarios[S.eu.id]?.foto ? "Trocar foto" : "Adicionar foto"}<input type="file" accept="image/*" id="fFoto" hidden></label>
+        ${S.usuarios[S.eu.id]?.foto ? `<button class="btn btn-sm btn-ghost" id="rmFoto">Remover</button>` : ""}</div></div></div>
+      <div class="label">O que você pode fazer</div><div class="checks">${S.eu.perfis.map((p) => `<label>${esc(PERFIS[p].nome)}<small>${PERFIS[p].faz}</small></label>`).join("")}</div>`,
     rodape: `<button class="btn" data-fechar>Fechar</button><button class="btn btn-primary" id="btnSair">${ic("logout")}Sair</button>`,
-    aoAbrir: (el, fechar) => { $("#btnSair", el).onclick = async () => { fechar(); await sb.auth.signOut(); telaLogin(); }; },
+    aoAbrir: (el, fechar) => {
+      $("#btnSair", el).onclick = async () => { fechar(); await sb.auth.signOut(); telaLogin(); };
+      const salvar = async (foto) => { await rpc("definir_foto", { p_foto: foto }); S.usuarios[S.eu.id].foto = foto; fechar(); toast(foto ? "Foto atualizada." : "Foto removida."); recarregar(); };
+      $("#rmFoto", el)?.addEventListener("click", () => salvar(null).catch((e) => toast(errMsg(e), true)));
+      $("#fFoto", el).onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        try { salvar(await reduzirFoto(f)); } catch (err) { toast("Não foi possível usar essa imagem.", true); }
+      };
+    },
+  });
+}
+// recorta no centro e reduz para 160×160 (JPEG ~8 KB) antes de salvar
+function reduzirFoto(arquivo) {
+  return new Promise((ok, erro) => {
+    const img = new Image(), url = URL.createObjectURL(arquivo);
+    img.onload = () => { const t = 160, c = document.createElement("canvas"); c.width = c.height = t;
+      const lado = Math.min(img.width, img.height); c.getContext("2d").drawImage(img, (img.width - lado) / 2, (img.height - lado) / 2, lado, lado, 0, 0, t, t);
+      URL.revokeObjectURL(url); ok(c.toDataURL("image/jpeg", 0.82)); };
+    img.onerror = erro; img.src = url;
   });
 }
 
@@ -299,7 +418,7 @@ function card(o, { acoes = false } = {}) {
     <div class="os-top"><span class="os-id">${osId(o.id)}</span>${sev(o.prioridade)}<span class="os-age${late ? " late" : ""}" title="Aberta em ${fmtDH(o.aberta_em)}">${idade(o.aberta_em)}</span></div>
     <div class="os-title">${esc(o.descricao)}</div>
     <div class="os-meta"><span>${ic("pin")}${esc(nomeN(o.nucleo_id))} · ${localCurto(o.galpoes)}</span>${o.equipamento ? `<span>${ic(eqIcon(o.equipamento))}${esc(o.equipamento)}</span>` : ""}</div>
-    <div class="os-foot">${stTag(o.status, o)}<span class="who"><span class="avatar">${ini(nomeU(resp))}</span>${esc(nomeU(resp).split(" ")[0])}</span></div>
+    <div class="os-foot">${stTag(o.status, o)}<span class="who">${av(resp)}${esc(nomeU(resp).split(" ")[0])}</span></div>
     ${acoes ? acoesRapidas(o) : ""}
   </article>`;
 }
@@ -354,7 +473,11 @@ async function viewInicio() {
     html += secao("Sua fila", data.filter((o) => o.status === "DIRECIONADA"), { acoes: true, vazio: "Sua fila está vazia. Bom trabalho!" });
   }
   if (tok !== S.tok) return;
+  if (!S.avisos) await atualizarBadges();
+  const pend = (S.avisos || []).filter((x) => x.urg && x.os && !x.visto);
+  if (pend.length) html = html.replace('</h2></div>', `</h2></div><button class="alerta-emerg" id="verAvisos">${ic("alert")}<span><b>${pend.length} ${pend.length > 1 ? "avisos urgentes" : "aviso urgente"}</b><small>${esc(pend[0].titulo)}</small></span>${ic("right")}</button>`);
   $("#pl").innerHTML = html;
+  $("#verAvisos")?.addEventListener("click", () => folhaAvisos());
   $("#ctaNova")?.addEventListener("click", novaOS);
   $("#pl").addEventListener("click", (e) => {
     const s = e.target.closest("[data-grupo]"); if (s) { S.lista.grupo = s.dataset.grupo; ir("ordens"); }
@@ -365,33 +488,46 @@ async function viewInicio() {
 const vazioDetalhe = () => `<div class="empty-detail"><div>${ic("inbox")}<p>Selecione uma OS para ver os detalhes</p></div></div>`;
 
 /* ---------------- Ordens (busca e filtros) ---------------- */
+// filtros da lista: [chave, rótulo, ícone, consulta no banco, teste local p/ contagem]
 const GRUPOS = () => [
-  ["abertas", "Em aberto", (q) => q.in("status", ABERTOS)],
-  ...(tem("gestor") ? [["classificar", "A direcionar", (q) => q.in("status", ["ABERTA", "PENDENTE DE ATENDIMENTO"])]] : []),
-  ...(podeVerTudo() ? [["emergencia", "Emergências", (q) => q.in("status", ABERTOS).eq("prioridade", "EMERGENCIA")]] : []),
-  ["atendimento", "Em atendimento", (q) => q.in("status", ["DIRECIONADA", "EM ATENDIMENTO"])],
-  ["aguardando", "Aguardando técnico", (q) => q.eq("status", "AGUARDANDO CONFIRMAÇÃO")],
-  ["concluidas", "Concluídas", (q) => q.eq("status", "CONCLUÍDA")],
-  ["todas", "Todas", (q) => q],
+  ["abertas", "Em aberto", "inbox", (q) => q.in("status", ABERTOS), (o) => ABERTOS.includes(o.status)],
+  ...(tem("gestor") ? [["classificar", "A direcionar", "send", (q) => q.in("status", ["ABERTA", "PENDENTE DE ATENDIMENTO"]), (o) => ["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(o.status)]] : []),
+  ...(podeVerTudo() ? [["emergencia", "Emergências", "alert", (q) => q.in("status", ABERTOS).eq("prioridade", "EMERGENCIA"), (o) => ABERTOS.includes(o.status) && o.prioridade === "EMERGENCIA"]] : []),
+  ["atendimento", "Em atendimento", "tool", (q) => q.in("status", ["DIRECIONADA", "EM ATENDIMENTO"]), (o) => ["DIRECIONADA", "EM ATENDIMENTO"].includes(o.status)],
+  ["aguardando", "Aguardando técnico", "clock", (q) => q.eq("status", "AGUARDANDO CONFIRMAÇÃO"), (o) => o.status === "AGUARDANDO CONFIRMAÇÃO"],
+  ["concluidas", "Concluídas", "checkc", (q) => q.eq("status", "CONCLUÍDA"), (o) => o.status === "CONCLUÍDA"],
+  ["todas", "Todas", "list", (q) => q, () => true],
 ];
 async function viewOrdens() {
   const L = S.lista; if (!GRUPOS().some((g) => g[0] === L.grupo)) L.grupo = "abertas";
-  $("#view").innerHTML = `<div class="split"><div class="pane-list">
+  const rotG = () => GRUPOS().find((g) => g[0] === L.grupo);
+  let cont = {};
+  $("#view").innerHTML = `<div class="split tri">
+    <aside class="pane-folders" aria-label="Filtros">
+      <div class="pf-t">Mostrar</div>
+      <div id="folders">${GRUPOS().map(([k, r, i]) => `<button data-g="${k}" aria-pressed="${k === L.grupo}">${ic(i)}<span>${r}</span><b data-c="${k}"></b></button>`).join("")}</div>
+    </aside>
+    <div class="pane-list">
       ${tem("tecnico") ? `<button class="btn btn-brand btn-block mob-only" id="btnNovaL" style="margin-bottom:12px">${ic("plus")}Abrir nova OS</button>` : ""}
+      <button class="mostrar" id="btnMostrar"><small>Mostrar</small><span id="mostrarRot"></span>${ic("right")}</button>
       <div class="toolbar"><label class="search">${ic("search")}<input class="input" id="busca" placeholder="Buscar nº, serviço ou equipamento" value="${esc(L.q)}"></label>
         ${podeVerTudo() ? `<select class="input" id="fNuc"><option value="">Todas as granjas</option>${S.nucleos.map((n) => `<option value="${n.id}" ${+L.nuc === n.id ? "selected" : ""}>${esc(n.nome)}</option>`).join("")}</select>` : ""}</div>
-      <div class="seg" id="seg">${GRUPOS().map(([k, r]) => `<button data-g="${k}" aria-pressed="${k === L.grupo}">${r}</button>`).join("")}</div>
       <div id="res" class="stack"><div class="skel"></div><div class="skel"></div></div>
       <button class="btn btn-sm more" id="mais" hidden>Mostrar mais</button>
     </div><div class="pane-detail" id="pd">${vazioDetalhe()}</div></div>`;
   let limite = 30, dados = [];
   const tok = S.tok;
+  const escopo = (q) => { if (!podeVerTudo()) q = tem("tecnico") ? q.eq("solicitante_id", S.eu.id) : q.eq("manutentor_id", S.eu.id); return L.nuc ? q.eq("nucleo_id", +L.nuc) : q; };
+  const pintarRot = () => { const g = rotG(); $("#mostrarRot").innerHTML = `${ic(g[2])}${g[1]}${cont[g[0]] != null ? `<b>${cont[g[0]]}</b>` : ""}`; };
+  async function contar() {
+    const { data } = await escopo(sb.from("ordens_servico").select("id,status,prioridade")).range(0, 19999);
+    if (tok !== S.tok || !data) return;
+    cont = Object.fromEntries(GRUPOS().map((g) => [g[0], data.filter(g[4]).length]));
+    $$("#folders [data-c]").forEach((b) => (b.textContent = cont[b.dataset.c]));
+    pintarRot();
+  }
   async function buscar() {
-    let q = sb.from("ordens_servico").select(CAMPOS);
-    if (!podeVerTudo()) q = tem("tecnico") ? q.eq("solicitante_id", S.eu.id) : q.eq("manutentor_id", S.eu.id);
-    if (L.nuc) q = q.eq("nucleo_id", +L.nuc);
-    q = GRUPOS().find((g) => g[0] === L.grupo)[2](q);
-    const { data, error } = await q.order("id", { ascending: false }).range(0, 999);
+    const { data, error } = await rotG()[3](escopo(sb.from("ordens_servico").select(CAMPOS))).order("id", { ascending: false }).range(0, 999);
     if (tok !== S.tok) return;
     if (error) return toast(errMsg(error), true);
     dados = data; desenhar();
@@ -402,13 +538,18 @@ async function viewOrdens() {
     $("#res").innerHTML = f.length ? f.slice(0, limite).map((o) => card(o)).join("") : `<div class="zero">Nenhuma OS encontrada com esses filtros.</div>`;
     $("#mais").hidden = f.length <= limite;
   }
-  $("#seg").onclick = (e) => { const b = e.target.closest("[data-g]"); if (!b) return; L.grupo = b.dataset.g; $$("#seg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); limite = 30; buscar(); };
+  const escolher = (k) => { L.grupo = k; $$("#folders button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.g === k)); pintarRot(); limite = 30; buscar(); };
+  $("#folders").onclick = (e) => { const b = e.target.closest("[data-g]"); if (b) escolher(b.dataset.g); };
+  // celular e telas menores: lista vertical em folha
+  $("#btnMostrar").onclick = () => folha({ titulo: "Mostrar", corpo: `<div class="folders-v">${GRUPOS().map(([k, r, i]) =>
+      `<button data-g="${k}" aria-pressed="${k === L.grupo}">${ic(i)}<span>${r}</span><b>${cont[k] ?? ""}</b>${k === L.grupo ? ic("check") : ""}</button>`).join("")}</div>`,
+    aoAbrir: (el, fechar) => { $(".folders-v", el).onclick = (e) => { const b = e.target.closest("[data-g]"); if (b) { fechar(); escolher(b.dataset.g); } }; } });
   $("#busca").oninput = (e) => { L.q = e.target.value; limite = 30; desenhar(); };
-  $("#fNuc")?.addEventListener("change", (e) => { L.nuc = e.target.value; buscar(); });
+  $("#fNuc")?.addEventListener("change", (e) => { L.nuc = e.target.value; contar(); buscar(); });
   $("#mais").onclick = () => { limite += 30; desenhar(); };
   $("#btnNovaL")?.addEventListener("click", novaOS);
   ligarLista($("#res"));
-  buscar();
+  pintarRot(); contar(); buscar();
 }
 
 /* ---------------- Detalhe da OS ---------------- */
@@ -487,7 +628,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
   const ult = [...hist].reverse().find((h) => h.status === "PENDENTE DE ATENDIMENTO");
   const RES = { CONFIRMADO: ["ok", "Resolvido"], NAO_RESOLVIDO: ["bad", "Não resolvido"], RECUSADO: ["bad", "Recusada"] };
   const ciclos = [...at].reverse().map((a) => `<div class="cycle">
-    <div class="cycle-h"><span class="avatar" style="width:26px;height:26px;font-size:10px">${ini(nomeU(a.manutentor_id))}</span><b>${esc(nomeU(a.manutentor_id))}</b><small>Atendimento ${a.ciclo}</small>${a.resultado ? `<span class="tag ${RES[a.resultado][0]}">${RES[a.resultado][1]}</span>` : a.finalizada_em ? `<span class="tag">Aguardando técnico</span>` : `<span class="tag">Em curso</span>`}</div>
+    <div class="cycle-h">${av(a.manutentor_id, "sm")}<b>${esc(nomeU(a.manutentor_id))}</b><small>Atendimento ${a.ciclo}</small>${a.resultado ? `<span class="tag ${RES[a.resultado][0]}">${RES[a.resultado][1]}</span>` : a.finalizada_em ? `<span class="tag">Aguardando técnico</span>` : `<span class="tag">Em curso</span>`}</div>
     <small>Direcionada ${fmtDH(a.direcionada_em)}${a.iniciada_em ? ` · início ${fmtDH(a.iniciada_em)}` : ""}${a.finalizada_em ? ` · término ${fmtDH(a.finalizada_em)}` : ""}</small>
     ${(() => { const pz = pausas.filter((p) => p.atendimento_id === a.id); if (!pz.length) return "";
       const tot = pz.reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
@@ -553,7 +694,7 @@ async function folhaDirecionar(o, fim) {
     corpo: `<div class="label">Classificação</div>${prioOpts(o.prioridade || "")}
       <div class="label">Manutentor <span class="muted" style="font-weight:400">— carga atual entre parênteses</span></div>
       <div class="people" id="pessoas">${mnts.map((u) => { const n = fila.filter((f) => f.manutentor_id === u.id).length;
-        return `<button type="button" class="person" data-u="${u.id}" aria-checked="false"><span class="avatar">${ini(u.nome)}</span><span><b>${esc(u.nome)}</b><small>Manutentor</small></span><span class="load"><b>${n}</b>na fila</span></button>`; }).join("")}</div>
+        return `<button type="button" class="person" data-u="${u.id}" aria-checked="false">${av(u.id)}<span><b>${esc(u.nome)}</b><small>Manutentor</small></span><span class="load"><b>${n}</b>na fila</span></button>`; }).join("")}</div>
       <p class="err" id="erroD"></p>`,
     rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okD">${ic("send")}Direcionar</button>`,
     aoAbrir: (el, fechar) => {
@@ -840,13 +981,13 @@ async function carregarPainel() {
     <div class="legend" style="grid-template-columns:repeat(4,max-content);gap:16px">${Object.keys(PRIO).map((k) => `<div style="grid-template-columns:10px auto"><i style="background:${PCOR[k]}"></i><span>${PRIO[k].rot}</span></div>`).join("")}</div>`;
   S.painel = { T, PZ, A, ini0, dias, pausaAt, durP };
   const eqMed = (f) => media(eq.map(f).filter((x) => x != null));
-  const linhaT = (e) => `<tr data-u="${e.u.id}"><td><span class="who-cell"><span class="avatar">${ini(e.u.nome)}</span>${esc(e.u.nome)}</span></td>
-    <td class="n">${e.fin}</td><td class="n">${fmtHoras(e.horas)}</td><td class="n">${fmtMin(e.media)}</td><td class="n">${fmtMin(e.respMed)}</td>
-    <td class="n">${e.retr == null ? "—" : e.retr + "%"}</td><td class="n">${e.recusas}</td><td class="n">${fmtMin(e.parado)}</td><td class="n">${e.maos}${e.longos ? ` <span title="Atendimento com mais de 12 h">${ic("alert")}</span>` : ""}</td></tr>`;
+  const linhaT = (e) => `<tr data-u="${e.u.id}"><td data-l="Manutentor"><span class="who-cell">${av(e.u.id)}${esc(e.u.nome)}</span></td>
+    <td class="n" data-l="OS atendidas">${e.fin}</td><td class="n" data-l="Horas trabalhadas">${fmtHoras(e.horas)}</td><td class="n" data-l="Tempo médio">${fmtMin(e.media)}</td><td class="n" data-l="Resposta média">${fmtMin(e.respMed)}</td>
+    <td class="n" data-l="Retrabalho">${e.retr == null ? "—" : e.retr + "%"}</td><td class="n" data-l="Recusas">${e.recusas}</td><td class="n" data-l="Tempo parado">${fmtMin(e.parado)}</td><td class="n" data-l="Em mãos">${e.maos}${e.longos ? ` <span title="Atendimento com mais de 12 h">${ic("alert")}</span>` : ""}</td></tr>`;
   $("#gTeam").innerHTML = `<div class="tbl"><table class="t team-t"><thead><tr><th>Manutentor</th><th class="n">OS atendidas</th><th class="n">Horas trabalhadas</th><th class="n">Tempo médio por OS</th>
     <th class="n">Resposta média</th><th class="n">Retrabalho</th><th class="n">Recusas</th><th class="n">Tempo parado</th><th class="n">Em mãos</th></tr></thead>
     <tbody>${eq.map(linhaT).join("")}</tbody>
-    <tfoot><tr><td>Média da equipe</td><td class="n">${Math.round(eqMed((e) => e.fin) || 0)}</td><td class="n">${fmtHoras(eqMed((e) => e.horas))}</td><td class="n">${fmtMin(eqMed((e) => e.media))}</td>
+    <tfoot><tr><td data-l="">Média da equipe</td><td class="n">${Math.round(eqMed((e) => e.fin) || 0)}</td><td class="n">${fmtHoras(eqMed((e) => e.horas))}</td><td class="n">${fmtMin(eqMed((e) => e.media))}</td>
     <td class="n">${fmtMin(eqMed((e) => e.respMed))}</td><td class="n">${eqMed((e) => e.retr) == null ? "—" : Math.round(eqMed((e) => e.retr)) + "%"}</td><td class="n">${(eqMed((e) => e.recusas) || 0).toFixed(1).replace(".", ",")}</td>
     <td class="n">${fmtMin(eqMed((e) => e.parado))}</td><td class="n">—</td></tr></tfoot></table></div>
     <p class="muted" style="font-size:12px;margin-top:10px">Horas trabalhadas = tempo registrado entre Iniciar e Finalizar, menos as pausas. Não inclui deslocamento nem serviço feito sem OS.</p>`;
@@ -856,8 +997,8 @@ async function carregarPainel() {
   const g = {}; L.forEach((r) => { (g[r.nucleo_id] ??= []).push(r); });
   const og = Object.entries(g).sort((a, b) => b[1].length - a[1].length);
   $("#gGranja").innerHTML = og.length ? barras(og.map(([id, rs]) => ({ l: esc(nomeN(+id)), v: rs.length, e: fmtMin(mediana(rs.map((r) => r.min_lead_total))) })), og[0][1].length) : `<div class="zero">Sem OS no período.</div>`;
-  const av = {}; let toda = 0; L.forEach((r) => { if (!(r.galpoes || []).length) toda++; (r.galpoes || []).forEach((x) => { const k = `${r.nucleo_id}|${x}`; av[k] = (av[k] || 0) + 1; }); });
-  const ta = Object.entries(av).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const porAv = {}; let toda = 0; L.forEach((r) => { if (!(r.galpoes || []).length) toda++; (r.galpoes || []).forEach((x) => { const k = `${r.nucleo_id}|${x}`; porAv[k] = (porAv[k] || 0) + 1; }); });
+  const ta = Object.entries(porAv).sort((a, b) => b[1] - a[1]).slice(0, 10);
   $("#gAv").innerHTML = ta.length ? barras(ta.map(([k, v]) => { const [nn, x] = k.split("|"); return { l: `${esc(nomeN(+nn))} · Av. ${x}`, v, c: v > 1 ? "#D9590B" : "#A1A4A9" }; }), ta[0][1])
     + `<p class="muted" style="font-size:12px;margin-top:12px">${toda} OS foram para a granja toda e não entram nesta lista.</p>` : `<div class="zero">Sem OS com aviário no período.</div>`;
   const e2 = {}; L.forEach((r) => { (e2[(r.equipamento || "Não informado").trim()] ??= []).push(r); });
@@ -931,7 +1072,7 @@ function viewUsuarios() {
     <div class="dash-bar"><span class="muted">${u.filter((x) => x.ativo).length} com acesso · ${u.filter((x) => !x.ativo).length} sem acesso</span><div style="flex:1"></div>
       <button class="btn btn-primary" id="novoU">${ic("plus")}Cadastrar usuário</button></div>
     <div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Acesso</th></tr></thead>
-    <tbody>${u.map((x) => `<tr data-u="${x.id}" style="${x.ativo ? "" : "opacity:.55"}"><td><span class="who-cell"><span class="avatar">${ini(x.nome)}</span>${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
+    <tbody>${u.map((x) => `<tr data-u="${x.id}" style="${x.ativo ? "" : "opacity:.55"}"><td><span class="who-cell">${av(x.id)}${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
       <td>${x.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td><td><span class="onoff${x.ativo ? "" : " off"}">${x.ativo ? "Liberado" : "Retirado"}</span></td></tr>`).join("")}</tbody></table></div></div>`;
   $("#novoU").onclick = () => folhaUsuario(null);
   $(".users tbody").onclick = (e) => { const tr = e.target.closest("[data-u]"); if (tr) folhaUsuario(S.usuarios[tr.dataset.u]); };
@@ -970,3 +1111,231 @@ function folhaUsuario(u) {
 /* ---------------- início ---------------- */
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") telaLogin(); });
 iniciar().catch((e) => telaLogin(errMsg(e)));
+/* ---------------- Relatórios (resumo consolidado + PDF + Excel) ---------------- */
+function faixaPeriodo(sel, de, ate) {
+  const d = (iso) => new Date(`${iso}T00:00:00-03:00`), mais = (x, n) => new Date(x.getTime() + n * 864e5);
+  const hoje = d(hojeISO()), dow = (hoje.getUTCDay() + 6) % 7; // segunda = 0 (meia-noite de Brasília = 03:00 UTC)
+  const [y, m] = hojeISO().split("-").map(Number), mes = (yy, mm) => d(`${yy}-${String(mm).padStart(2, "0")}-01`);
+  switch (sel) {
+    case "hoje": return [hoje, mais(hoje, 1), "Hoje"];
+    case "semana": return [mais(hoje, -dow), mais(hoje, 1), "Esta semana"];
+    case "semana_ant": return [mais(hoje, -dow - 7), mais(hoje, -dow), "Semana passada"];
+    case "mes": return [mes(y, m), mais(hoje, 1), "Este mês"];
+    case "mes_ant": return [m === 1 ? mes(y - 1, 12) : mes(y, m - 1), mes(y, m), "Mês passado"];
+    case "30": return [mais(hoje, -29), mais(hoje, 1), "Últimos 30 dias"];
+    default: return [d(de), mais(d(ate), 1), "Período escolhido"];
+  }
+}
+const dataBR = (x) => x.toLocaleDateString("pt-BR", { timeZone: TZ });
+
+async function viewRelatorios() {
+  const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
+  $("#view").innerHTML = `<div class="content">
+    <section class="card rel-filtros">
+      <div class="rf-grid">
+        <label class="field"><span>Período</span><select class="input" id="rPer">
+          <option value="hoje">Hoje</option><option value="semana">Esta semana</option><option value="semana_ant">Semana passada</option>
+          <option value="mes" selected>Este mês</option><option value="mes_ant">Mês passado</option><option value="30">Últimos 30 dias</option><option value="x">Escolher datas…</option></select></label>
+        <label class="field" id="rDeL" hidden><span>De</span><input type="date" class="input" id="rDe" value="${hojeISO(-30)}"></label>
+        <label class="field" id="rAteL" hidden><span>Até</span><input type="date" class="input" id="rAte" value="${hojeISO()}"></label>
+        <label class="field"><span>Manutentor</span><select class="input" id="rMnt"><option value="">Todos</option>${mnts.map((u) => `<option value="${u.id}">${esc(u.nome)}</option>`).join("")}</select></label>
+        <label class="field"><span>Granja</span><select class="input" id="rNuc"><option value="">Todas</option>${S.nucleos.map((n) => `<option value="${n.id}">${esc(n.nome)}</option>`).join("")}</select></label>
+        <label class="field"><span>Classificação</span><select class="input" id="rPrio"><option value="">Todas</option>${Object.entries(PRIO).map(([k, v]) => `<option value="${k}">${v.rot}</option>`).join("")}</select></label>
+      </div>
+      <div class="rel-acoes"><span class="muted" id="rInfo"></span><div class="grow"></div>
+        <button class="btn" id="bXls">${ic("sheet")}Exportar Excel</button><button class="btn btn-primary" id="bPdf">${ic("download")}Exportar PDF</button></div>
+    </section>
+    <div id="relOut"><div class="stack"><div class="skel"></div><div class="skel"></div></div></div></div>`;
+  $("#rPer").onchange = () => { const x = $("#rPer").value === "x"; $("#rDeL").hidden = $("#rAteL").hidden = !x; gerarRelatorio(); };
+  ["rDe", "rAte", "rMnt", "rNuc", "rPrio"].forEach((i) => ($("#" + i).onchange = gerarRelatorio));
+  $("#bPdf").onclick = (e) => busy(e.currentTarget, exportarPDF);
+  $("#bXls").onclick = (e) => busy(e.currentTarget, exportarExcel);
+  gerarRelatorio();
+}
+
+async function gerarRelatorio() {
+  const tok = S.tok, [ini0, fim0, rotPer] = faixaPeriodo($("#rPer").value, $("#rDe").value, $("#rAte").value);
+  if (!(fim0 > ini0)) return toast("Confira as datas do período.", true);
+  const mnt = $("#rMnt").value, nuc = $("#rNuc").value ? +$("#rNuc").value : null, prio = $("#rPrio").value;
+  const dentro = (ts) => ts && new Date(ts) >= ini0 && new Date(ts) < fim0;
+  const antes = new Date(ini0.getTime() - 90 * 864e5).toISOString();
+  let qL = sb.from("vw_os_lead").select("*").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).range(0, 9999);
+  if (nuc) qL = qL.eq("nucleo_id", nuc); if (prio) qL = qL.eq("prioridade", prio);
+  const [rL, rT, rP, rO] = await Promise.all([qL,
+    sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade,equipamento,descricao,galpoes)").gte("direcionada_em", antes).range(0, 19999),
+    sb.from("os_pausas").select("*").gte("inicio", antes).range(0, 19999),
+    sb.from("ordens_servico").select("id,descricao,equipamento,galpoes,status,pausada_em,pausa_motivo").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).range(0, 9999)]);
+  if (tok !== S.tok) return;
+  const err = rL.error || rT.error || rP.error; if (err) return toast(errMsg(err), true);
+  const osInfo = Object.fromEntries(rO.data.map((o) => [o.id, o]));
+  let L = rL.data, T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && (!prio || a.ordens_servico?.prioridade === prio));
+  if (mnt) { const osDoMnt = new Set(T.filter((a) => a.manutentor_id === mnt).map((a) => a.os_id)); L = L.filter((r) => r.manutentor_id === mnt || osDoMnt.has(r.id)); T = T.filter((a) => a.manutentor_id === mnt); }
+  const pausaAt = (id) => rP.data.filter((p) => p.atendimento_id === id && p.fim).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
+  const liq = (a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id);
+  const finT = T.filter((a) => dentro(a.finalizada_em)), iniT = T.filter((a) => dentro(a.iniciada_em));
+  const devol = T.filter((a) => dentro(a.avaliado_em) && ["RECUSADO", "NAO_RESOLVIDO"].includes(a.resultado));
+  const idsT = new Set(T.map((a) => a.id)), pz = rP.data.filter((p) => idsT.has(p.atendimento_id) && dentro(p.inicio));
+  const parado = pz.reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
+  const concl = L.filter((r) => r.status === "CONCLUÍDA"), pend = L.filter((r) => r.status !== "CONCLUÍDA");
+  const semInicio = pend.filter((r) => ["ABERTA", "DIRECIONADA", "PENDENTE DE ATENDIMENTO"].includes(r.status));
+  const R = {
+    rotPer, ini0, fim0, filtros: [["Período", `${rotPer} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Granja", nuc ? nomeN(nuc) : "Todas"], ["Classificação", prio ? PRIO[prio].rot : "Todas"]],
+    k: { abertas: L.length, concl: concl.length, pct: pct(concl.length, L.length), pend: pend.length, semInicio: semInicio.length, andamento: pend.length - semInicio.length,
+      devol: devol.length, recusas: devol.filter((a) => a.resultado === "RECUSADO").length, naoRes: devol.filter((a) => a.resultado === "NAO_RESOLVIDO").length,
+      horas: finT.reduce((s2, a) => s2 + liq(a), 0), atendidas: finT.length, medio: media(finT.map(liq)), resposta: media(iniT.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
+      lead: media(concl.map((r) => r.min_lead_total)), parado },
+  };
+  const mntsR = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor") && (!mnt || u.id === mnt)).sort((a, b) => a.nome.localeCompare(b.nome));
+  R.porMnt = mntsR.map((u) => { const f = finT.filter((a) => a.manutentor_id === u.id), dv = devol.filter((a) => a.manutentor_id === u.id), ii = iniT.filter((a) => a.manutentor_id === u.id);
+    const pp = pz.filter((p) => p.manutentor_id === u.id).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
+    return [u.nome, f.length, f.reduce((s2, a) => s2 + liq(a), 0), media(f.map(liq)), media(ii.map((a) => minEntre(a.iniciada_em, a.direcionada_em))), dv.filter((a) => a.resultado === "RECUSADO").length, dv.filter((a) => a.resultado === "NAO_RESOLVIDO").length, pp]; });
+  const gIds = [...new Set(L.map((r) => r.nucleo_id))].sort((a, b) => nomeN(a).localeCompare(nomeN(b)));
+  R.porGranja = gIds.map((g) => { const l = L.filter((r) => r.nucleo_id === g), c = l.filter((r) => r.status === "CONCLUÍDA").length, f = finT.filter((a) => a.ordens_servico?.nucleo_id === g);
+    return [nomeN(g), l.length, c, pct(c, l.length), l.length - c, media(f.map(liq))]; });
+  R.porPrio = [...Object.keys(PRIO), null].map((k) => { const l = L.filter((r) => (r.prioridade ?? null) === k), c = l.filter((r) => r.status === "CONCLUÍDA");
+    return [k ? PRIO[k].rot : "A classificar", l.length, c.length, pct(c.length, l.length), media(l.map((r) => r.min_ate_inicio)), media(c.map((r) => r.min_lead_total)), k]; }).filter((x) => x[1]);
+  R.pendentes = pend.sort((a, b) => new Date(a.aberta_em) - new Date(b.aberta_em)).map((r) => { const o = osInfo[r.id] || {};
+    return [osId(r.id), fmtDH(r.aberta_em), `${nomeN(r.nucleo_id)} · ${localCurto(r.galpoes)}`, o.equipamento || "—", o.descricao || "", r.prioridade ? PRIO[r.prioridade].rot : "A classificar",
+      o.pausada_em ? "Pausada" : STATUS[r.status].rot, r.manutentor_id ? nomeU(r.manutentor_id) : "—", idade(r.aberta_em)]; });
+  R.pendKeys = pend.map((r) => ({ id: r.id, prio: r.prioridade, status: r.status, pausa: osInfo[r.id]?.pausada_em }));
+  R.devolucoes = devol.sort((a, b) => new Date(b.avaliado_em) - new Date(a.avaliado_em)).map((a) => [osId(a.os_id), fmtDH(a.avaliado_em), a.resultado === "RECUSADO" ? "Recusada pelo manutentor" : "Técnico: não resolvido",
+    nomeU(a.manutentor_id), a.ordens_servico?.descricao || "", a.motivo_recusa || "—"]);
+  S.rel = R;
+  desenharRelatorio(R);
+}
+
+function desenharRelatorio(R) {
+  const k = R.k;
+  const met = (l, v, nota, hot = false) => `<div class="rm${hot ? " hot" : ""}"><small>${l}</small><b>${v}</b><span>${nota}</span></div>`;
+  const pbar = (p) => `<span class="pct"><span class="pbar"><i style="width:${p}%"></i></span>${p}%</span>`;
+  const tabela = (tit, sub, cols, linhas, total, vazio = "Nada no período.") => `<section class="rel-bloco">
+      <div class="rel-bh"><h3>${tit}</h3>${sub ? `<span>${sub}</span>` : ""}</div>
+      ${linhas.length ? `<div class="tscroll"><table class="rt"><thead><tr>${cols.map((c) => `<th class="${c[1] || ""}">${c[0]}</th>`).join("")}</tr></thead>
+        <tbody>${linhas.map((l) => `<tr>${l.map((v, i) => `<td class="${cols[i][1] || ""}">${v}</td>`).join("")}</tr>`).join("")}</tbody>
+        ${total ? `<tfoot><tr>${total.map((v, i) => `<td class="${cols[i][1] || ""}">${v}</td>`).join("")}</tr></tfoot>` : ""}</table></div>` : `<div class="rel-vazio">${vazio}</div>`}
+    </section>`;
+  const soma = (arr, i) => arr.reduce((s2, l) => s2 + (+l[i] || 0), 0);
+  const totG = [soma(R.porGranja, 1), soma(R.porGranja, 2), soma(R.porGranja, 4)];
+  $("#rInfo").textContent = R.filtros[0][1];
+  $("#relOut").innerHTML = `<div class="rel-doc">
+    <header class="rel-cab">
+      <div><small>Relatório de manutenção das granjas</small><h2>${esc(R.rotPer)}</h2><p>${dataBR(R.ini0)} a ${dataBR(new Date(R.fim0 - 1))}</p></div>
+      <div class="rel-chips">${R.filtros.slice(1).map(([a, b]) => `<span><em>${a}</em>${esc(b)}</span>`).join("")}</div>
+    </header>
+    <div class="rel-paineis">
+      <section class="rel-painel"><h4>${ic("list")}Volume de OS</h4><div class="rel-met">
+        ${met("Abertas no período", k.abertas, "total de OS abertas")}
+        ${met("Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas} concluídas`)}
+        ${met("Não atendidas", k.pend, `${k.semInicio} sem início · ${k.andamento} em andamento`, k.semInicio > 0)}
+        ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas`, k.devol > 0)}</div></section>
+      <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
+        ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
+        ${met("Tempo médio de atendimento", fmtMin(k.medio), "execução líquida por OS")}
+        ${met("Resposta média", fmtMin(k.resposta), "do direcionamento ao início")}
+        ${met("Lead médio", fmtMin(k.lead), "da abertura à confirmação")}</div></section>
+    </div>
+    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
+      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
+      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
+    <div class="rel-2">
+      ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
+        R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]),
+        R.porGranja.length > 1 ? ["Total", totG[0], totG[1], pbar(pct(totG[1], totG[0])), totG[2], fmtMin(k.medio)] : null)}
+      ${tabela("Por classificação", "tempos em média", [["Classificação"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Até começar", "n"], ["Lead médio", "n"]],
+        R.porPrio.map((l) => [sev(l[6]), l[1], l[2], pbar(l[3]), fmtMin(l[4]), fmtMin(l[5])]))}
+    </div>
+    ${tabela("OS não atendidas", `${R.pendentes.length} OS · da mais antiga para a mais nova`, [["OS"], ["Aberta há", "n"], ["Onde"], ["Equipamento"], ["Serviço", "wide"], ["Classificação"], ["Situação"], ["Manutentor"]],
+      R.pendentes.map((l, i) => { const p = R.pendKeys[i] || {}; return [`<span class="mono">${l[0]}</span>`, l[8], esc(l[2]), esc(l[3]), esc(l[4]), sev(p.prio),
+        p.pausa ? `<span class="st pausa">${ic("pause")}Pausada</span>` : stTag(p.status), esc(l[7])]; }), null, "Todas as OS do período foram concluídas.")}
+    ${tabela("Devoluções", `${R.devolucoes.length} no período`, [["OS"], ["Quando"], ["Tipo"], ["Manutentor"], ["Serviço", "wide"], ["Motivo", "wide"]],
+      R.devolucoes.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], `<span class="tag bad">${l[2]}</span>`, esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma devolução no período.")}
+    <p class="rel-nota">Horas trabalhadas = registradas no sistema (Iniciar → Finalizar, menos pausas). OS e percentuais consideram as OS abertas no período; horas e tempos, os atendimentos finalizados no período.</p>
+  </div>`;
+}
+
+async function logoDataURL() {
+  if (C.LOGO.startsWith("data:")) return C.LOGO;
+  const b = await (await fetch(C.LOGO)).blob();
+  return new Promise((ok) => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(b); });
+}
+const nomeArq = (ext) => `relatorio-manutencao_${S.rel.ini0.toLocaleDateString("sv-SE", { timeZone: TZ })}_${new Date(S.rel.fim0 - 1).toLocaleDateString("sv-SE", { timeZone: TZ })}.${ext}`;
+
+async function exportarPDF() {
+  if (!S.rel) return;
+  await carregarScript("jspdf.umd.min.js", () => window.jspdf);
+  await carregarScript("jspdf.plugin.autotable.min.js", () => window.jspdf?.jsPDF?.API?.autoTable);
+  const R = S.rel, k = R.k, { jsPDF } = window.jspdf, doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
+  const W = 210, M = 14, VERM = [215, 31, 43], TINTA = [18, 20, 23], CINZA = [106, 110, 117];
+  const logo = await logoDataURL();
+  // cabeçalho
+  doc.setFillColor(...TINTA); doc.rect(0, 0, W, 30, "F");
+  doc.setFillColor(...VERM); doc.rect(0, 30, W, 1.2, "F");
+  doc.addImage(logo, "PNG", M, 6.5, 34, 17);
+  doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(15);
+  doc.text("Relatório de Manutenção das Granjas", 54, 14);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(210, 212, 216);
+  doc.text(`${C.NOME_EMPRESA} · ${R.filtros[0][1]}`, 54, 20.5);
+  doc.text(`Gerado em ${new Date().toLocaleString("pt-BR", { timeZone: TZ })} por ${S.eu.nome}`, 54, 25.5);
+  // filtros
+  let y = 39; doc.setTextColor(...CINZA); doc.setFontSize(8.5);
+  doc.text(R.filtros.slice(1).map(([a, b]) => `${a}: ${b}`).join("     "), M, y);
+  // indicadores (2 linhas x 4)
+  const kp = [["OS abertas", String(k.abertas), "no período"], ["Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas}`], ["Não atendidas", String(k.pend), `${k.semInicio} sem início`],
+    ["Devolvidas", String(k.devol), `${k.recusas} rec. · ${k.naoRes} não res.`], ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos`], ["Tempo médio", fmtMin(k.medio), "por atendimento"],
+    ["Resposta média", fmtMin(k.resposta), "do direcionamento ao início"], ["Lead médio", fmtMin(k.lead), "da abertura à confirmação"]];
+  y += 5; const bw = (W - 2 * M - 9) / 4, bh = 19;
+  kp.forEach(([l, v, s2], i) => { const x = M + (i % 4) * (bw + 3), yy = y + Math.floor(i / 4) * (bh + 3);
+    doc.setDrawColor(226, 226, 222); doc.setFillColor(250, 250, 249); doc.roundedRect(x, yy, bw, bh, 2, 2, "FD");
+    doc.setFontSize(7.5); doc.setTextColor(...CINZA); doc.text(l, x + 3, yy + 5);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(...((l === "Não atendidas" && k.semInicio) || (l === "Devolvidas" && k.devol) ? VERM : TINTA)); doc.text(v, x + 3, yy + 12);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...CINZA); doc.text(s2, x + 3, yy + 16.5); });
+  y += 2 * bh + 10;
+  const secao = (tit, head, body, cols = {}) => {
+    if (y > 260) { doc.addPage(); y = 18; }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(tit, M, y);
+    doc.autoTable({ startY: y + 2.5, head: [head], body: body.length ? body : [[{ content: "Nada no período.", colSpan: head.length, styles: { halign: "center", textColor: CINZA } }]], margin: { left: M, right: M },
+      styles: { font: "helvetica", fontSize: 8, cellPadding: 1.8, textColor: TINTA, lineColor: [230, 230, 226], lineWidth: 0.1 },
+      headStyles: { fillColor: TINTA, textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [247, 247, 245] }, columnStyles: cols });
+    y = doc.lastAutoTable.finalY + 9;
+  };
+  const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
+  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas", "Tempo médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
+    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(7));
+  secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
+  secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
+  secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
+    R.pendentes.map((l) => [l[0], l[1], l[2], l[4], l[5], l[6], l[7], l[8]]), { 3: { cellWidth: 44 } });
+  secao(`Devoluções (${R.devolucoes.length})`, ["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], R.devolucoes, { 4: { cellWidth: 40 }, 5: { cellWidth: 44 } });
+  doc.setFontSize(7.5); doc.setTextColor(...CINZA);
+  doc.text("Horas trabalhadas = registradas no sistema (Iniciar a Finalizar, menos pausas). Percentuais sobre as OS abertas no período.", M, Math.min(y, 285));
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setDrawColor(230, 230, 226); doc.line(M, 288, W - M, 288); doc.setFontSize(7.5); doc.setTextColor(...CINZA);
+    doc.text(`${C.NOME_EMPRESA} · ${C.NOME_SISTEMA}`, M, 292); doc.text(`Página ${i} de ${n}`, W - M, 292, { align: "right" }); }
+  doc.save(nomeArq("pdf"));
+  toast("PDF gerado.");
+}
+
+async function exportarExcel() {
+  if (!S.rel) return;
+  await carregarScript("xlsx.mini.min.js", () => window.XLSX);
+  const R = S.rel, k = R.k, X = window.XLSX, wb = X.utils.book_new();
+  const h = (m) => (m == null ? null : Math.round((m / 60) * 100) / 100), mi = (m) => (m == null ? null : Math.round(m));
+  const aba = (nome, linhas, larguras) => { const ws = X.utils.aoa_to_sheet(linhas); ws["!cols"] = larguras.map((w) => ({ wch: w })); X.utils.book_append_sheet(wb, ws, nome); };
+  aba("Resumo", [["Relatório de Manutenção das Granjas"], [C.NOME_EMPRESA], [`Gerado em ${new Date().toLocaleString("pt-BR", { timeZone: TZ })} por ${S.eu.nome}`], [],
+    ...R.filtros, [], ["Indicador", "Valor", "Observação"],
+    ["OS abertas", k.abertas, "no período"], ["Concluídas", k.concl, ""], ["% finalização", k.pct / 100, "concluídas ÷ abertas"],
+    ["Não atendidas", k.pend, `${k.semInicio} sem início · ${k.andamento} em andamento`], ["Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas`],
+    ["Horas trabalhadas (h)", h(k.horas), "Iniciar → Finalizar, menos pausas"], ["Atendimentos finalizados", k.atendidas, ""],
+    ["Tempo médio de atendimento (min)", mi(k.medio), "execução líquida"], ["Resposta média (min)", mi(k.resposta), "direcionamento → início"],
+    ["Lead médio (min)", mi(k.lead), "abertura → confirmação"], ["Tempo parado (h)", h(k.parado), "pausas"]], [34, 22, 44]);
+  wb.Sheets.Resumo["B" + (R.filtros.length + 9)].z = "0%";
+  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Tempo médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
+    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 17, 20, 10, 14, 17]);
+  aba("Por granja", [["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio (min)"], ...R.porGranja.map((l) => [l[0], l[1], l[2], l[3] / 100, l[4], mi(l[5])])], [18, 10, 12, 14, 14, 18]);
+  aba("Por classificação", [["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar (min)", "Lead médio (min)"], ...R.porPrio.map((l) => [l[0], l[1], l[2], l[3] / 100, mi(l[4]), mi(l[5])])], [16, 10, 12, 14, 18, 17]);
+  aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
+  aba("Devoluções", [["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], ...R.devolucoes], [10, 16, 24, 22, 40, 40]);
+  ["Por granja", "Por classificação"].forEach((n) => { const ws = wb.Sheets[n]; for (let r = 2; r <= 40; r++) if (ws["D" + r]) ws["D" + r].z = "0%"; });
+  X.writeFile(wb, nomeArq("xlsx"));
+  toast("Excel gerado.");
+}
