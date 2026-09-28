@@ -856,6 +856,54 @@ function novaOS() {
   render();
 }
 /* ---------------- Painel ---------------- */
+/* ---------------- gráficos (SVG, sem biblioteca) ---------------- */
+function donut(partes, { centro = "", sub = "", tam = 170, esp = 20 } = {}) {
+  const p = partes.filter((x) => x.v > 0), tot = p.reduce((a, x) => a + x.v, 0), r = (tam - esp) / 2, cx = tam / 2, circ = 2 * Math.PI * r;
+  let off = 0; const gap = p.length > 1 ? 2.5 : 0;
+  const arcos = p.map((x) => { const len = (x.v / tot) * circ, el = `<circle r="${r}" cx="${cx}" cy="${cx}" fill="none" style="stroke:${x.c}" stroke-width="${esp}"
+      stroke-dasharray="${Math.max(0.01, len - gap)} ${circ}" stroke-dashoffset="${-off}"><title>${x.l}: ${x.v}</title></circle>`; off += len; return el; }).join("");
+  return `<div class="donut" style="--t:${tam}px"><svg viewBox="0 0 ${tam} ${tam}"><circle r="${r}" cx="${cx}" cy="${cx}" fill="none" stroke="#F1ECE6" stroke-width="${esp}"/>${arcos}</svg>
+    <div class="donut-c"><b>${centro}</b><small>${sub}</small></div></div>`;
+}
+const legenda = (partes, tot) => `<div class="leg">${partes.map((x) => `<div><i style="background:${x.c}"></i><span>${x.l}</span><b>${x.txt ?? x.v}</b>${tot ? `<em>${pct(x.v, tot)}%</em>` : ""}</div>`).join("")}</div>`;
+const donutBloco = (partes, opts) => { const tot = partes.reduce((a, x) => a + x.v, 0); return tot ? `<div class="donut-bloco">${donut(partes, opts)}${legenda(partes, tot)}</div>` : `<div class="zero">Sem dados no período.</div>`; };
+function suave(pts) { // curva suave passando pelos pontos
+  if (pts.length < 2) return pts.map((p, i) => `${i ? "L" : "M"}${p[0]},${p[1]}`).join("");
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 0; i < pts.length - 1; i++) { const [x0, y0] = pts[Math.max(0, i - 1)], [x1, y1] = pts[i], [x2, y2] = pts[i + 1], [x3, y3] = pts[Math.min(pts.length - 1, i + 2)];
+    d += ` C${x1 + (x2 - x0) / 6},${y1 + (y2 - y0) / 6} ${x2 - (x3 - x1) / 6},${y2 - (y3 - y1) / 6} ${x2},${y2}`; }
+  return d;
+}
+let gid = 0;
+function linhas(rotulos, series, { alt = 230, largura = 640 } = {}) {
+  const W = Math.max(300, Math.round(largura)), H = alt, pl = 34, pr = 14, pt = 16, pb = 28, n = rotulos.length;
+  const bruto = Math.max(1, ...series.flatMap((s2) => s2.v)), passo = Math.max(1, Math.ceil(bruto / 4)), max = passo * 4;
+  const x = (i) => pl + (n < 2 ? (W - pl - pr) / 2 : (i * (W - pl - pr)) / (n - 1)), y = (v) => pt + (H - pt - pb) * (1 - v / max);
+  const grade = [0, 1, 2, 3, 4].map((k) => `<line x1="${pl}" x2="${W - pr}" y1="${y(k * passo)}" y2="${y(k * passo)}" class="gl"/><text x="${pl - 8}" y="${y(k * passo) + 4}" class="gy">${k * passo}</text>`).join("");
+  const cada = Math.max(1, Math.ceil(n / 7));
+  const eixo = rotulos.map((r2, i) => (i % cada === 0 || i === n - 1 ? `<text x="${x(i)}" y="${H - 8}" class="gx">${r2}</text>` : "")).join("");
+  const desenhos = series.map((s2) => { const id = `g${++gid}`, pts = s2.v.map((v, i) => [x(i), y(v)]);
+    return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${s2.c}" stop-opacity=".22"/><stop offset="1" stop-color="${s2.c}" stop-opacity="0"/></linearGradient></defs>
+      <path d="${suave(pts)} L${x(n - 1)},${y(0)} L${x(0)},${y(0)} Z" fill="url(#${id})"/>
+      <path d="${suave(pts)}" fill="none" stroke="${s2.c}" stroke-width="2.6" stroke-linecap="round"/>
+      ${pts.map((p2, i) => `<circle cx="${p2[0]}" cy="${p2[1]}" r="3.6" fill="#fff" stroke="${s2.c}" stroke-width="2"><title>${rotulos[i]} · ${s2.l}: ${s2.v[i]}</title></circle>`).join("")}`; }).join("");
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">${grade}${desenhos}${eixo}</svg>
+    <div class="leg leg-h">${series.map((s2) => `<div><i style="background:${s2.c}"></i><span>${s2.l}</span><b>${s2.v.reduce((a, b) => a + b, 0)}</b></div>`).join("")}</div></div>`;
+}
+function medidor(p, { rot = "", cor = "var(--brand)" } = {}) {
+  const r = 70, c = Math.PI * r, len = (Math.max(0, Math.min(100, p)) / 100) * c;
+  return `<div class="gauge"><svg viewBox="0 0 180 104"><path d="M20,94 A70,70 0 0 1 160,94" fill="none" stroke="#F1ECE6" stroke-width="16" stroke-linecap="round"/>
+    <path d="M20,94 A70,70 0 0 1 160,94" fill="none" style="stroke:${cor}" stroke-width="16" stroke-linecap="round" stroke-dasharray="${len} ${c}"/></svg>
+    <div class="gauge-c"><b>${p}%</b><small>${rot}</small></div></div>`;
+}
+const delta = (atual, antes, menorMelhor = false, fmt = (v) => v) => {
+  if (antes == null || atual == null || !antes) return "";
+  const d = Math.round(((atual - antes) / antes) * 100); if (!d) return `<span class="dl">= período anterior</span>`;
+  const bom = menorMelhor ? d < 0 : d > 0;
+  return `<span class="dl ${bom ? "up" : "down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(d)}%<em> vs ${fmt(antes)}</em></span>`;
+};
+
+
 const vals = (a) => a.filter((x) => x != null && !isNaN(x)).map(Number);
 const media = (a) => { const v = vals(a); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
 const mediana = (a) => { const v = vals(a).sort((x, y) => x - y); if (!v.length) return null; const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
@@ -908,7 +956,9 @@ async function carregarPainel() {
   const qP = sb.from("os_pausas").select("*").gte("inicio", ini0.toISOString()).range(0, 9999);
   const qT = sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade)").gte("direcionada_em", ini0.toISOString()).range(0, 9999);
   if (nuc) { qL = qL.eq("nucleo_id", nuc); qA = qA.eq("nucleo_id", nuc); }
-  const [rL, rA, rT, rP] = await Promise.all([qL, qA, qT, qP]);
+  let qAnt = sb.from("vw_os_lead").select("status,min_lead_total,min_ate_inicio").gte("aberta_em", new Date(ini0 - dias * 864e5).toISOString()).lt("aberta_em", ini0.toISOString()).range(0, 4999);
+  if (nuc) qAnt = qAnt.eq("nucleo_id", nuc);
+  const [rL, rA, rT, rP, rAnt] = await Promise.all([qL, qA, qT, qP, qAnt]);
   if (tok !== S.tok) return;
   const L = rL.data, A = rA.data, T = rT.data.filter((a) => !nuc || a.ordens_servico?.nucleo_id === nuc);
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
@@ -916,17 +966,21 @@ async function carregarPainel() {
   const pausaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim).reduce((s2, p) => s2 + durP(p), 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), volt = L.filter((r) => r.recusas > 0 || r.nao_resolvidos > 0);
   const h = (o) => (Date.now() - new Date(o.aberta_em)) / 36e5, emerg = A.filter((o) => o.prioridade === "EMERGENCIA").length, velhas = A.filter((o) => h(o) > 168).length;
-  const kpi = (v, l, s, hot) => `<div class="kpi${hot ? " hot" : ""}"><small>${l}</small><b>${v}</b><span>${s}</span></div>`;
-  $("#kpis").innerHTML = kpi(L.length, "OS abertas", "no período") + kpi(concl.length, "Concluídas", `${pct(concl.length, L.length)}% das abertas`)
-    + kpi(fmtMin(mediana(concl.map((r) => r.min_lead_total))), "Lead típico", "mediana, abertura → confirmação")
-    + kpi(fmtMin(mediana(L.map((r) => r.min_ate_inicio))), "Até começar", "mediana, abertura → início")
-    + kpi(`${pct(volt.length, L.length)}%`, "Voltaram ao gestor", `${volt.length} recusadas ou não resolvidas`)
-    + kpi(A.length, "Em aberto agora", [emerg ? `${emerg} emergência(s)` : "", velhas ? `${velhas} há +7 dias` : ""].filter(Boolean).join(" · ") || "sem emergência", emerg > 0 || velhas > 0);
+  const An = rAnt.data || [], cAn = An.filter((r) => r.status === "CONCLUÍDA");
+  const kpi = (i, cor, v, l, s2, d = "", hot = false) => `<div class="kpi${hot ? " hot" : ""}"><div class="kpi-h"><span class="kpi-ic" style="--kc:${cor}">${ic(i)}</span><small>${l}</small></div><b>${v}</b><span class="kpi-s">${s2}</span>${d}</div>`;
+  const leadA = mediana(concl.map((r) => r.min_lead_total)), leadB = mediana(cAn.map((r) => r.min_lead_total));
+  const comA = mediana(L.map((r) => r.min_ate_inicio)), comB = mediana(An.map((r) => r.min_ate_inicio));
+  $("#kpis").innerHTML = kpi("inbox", "#2F6BD9", L.length, "OS abertas", "no período", delta(L.length, An.length, false))
+    + kpi("checkc", "#1E8E4E", `${pct(concl.length, L.length)}%`, "Finalizadas", `${concl.length} concluídas`, delta(pct(concl.length, L.length), pct(cAn.length, An.length), false, (v) => v + "%"))
+    + kpi("clock", "#E8A317", fmtMin(leadA), "Lead típico", "abertura → confirmação", delta(leadA, leadB, true, fmtMin))
+    + kpi("play", "#6D4AD4", fmtMin(comA), "Até começar", "abertura → início", delta(comA, comB, true, fmtMin))
+    + kpi("undo", "#B8325B", `${pct(volt.length, L.length)}%`, "Voltaram ao gestor", `${volt.length} recusadas ou não resolvidas`)
+    + kpi("alert", "#DF2331", A.length, "Em aberto agora", [emerg ? `${emerg} emergência(s)` : "", velhas ? `${velhas} há +7 dias` : ""].filter(Boolean).join(" · ") || "sem emergência", "", emerg > 0 || velhas > 0);
 
   // geral
   const st = ABERTOS.map((k) => ({ l: STATUS[k].rot, v: A.filter((o) => o.status === k).length, c: STATUS[k].c }));
-  st.splice(3, 0, { l: "↳ pausadas agora", v: A.filter((o) => o.pausada_em).length, c: "#9EA2A8" });
-  $("#gSit").innerHTML = barras(st, Math.max(1, ...st.map((x) => x.v)));
+  $("#gSit").innerHTML = donutBloco(ABERTOS.map((k) => ({ l: STATUS[k].rot, v: A.filter((o) => o.status === k && !o.pausada_em).length, c: STATUS[k].c }))
+    .concat([{ l: "Pausadas", v: A.filter((o) => o.pausada_em).length, c: "#B9B0A6" }]), { centro: A.length, sub: "em aberto" });
   const fx = [["Até 1 dia", 0, 24], ["1 a 3 dias", 24, 72], ["3 a 7 dias", 72, 168], ["+7 dias", 168, 1e9]].map(([l, a, b]) => [l, A.filter((o) => h(o) >= a && h(o) < b).length]);
   const mf = Math.max(1, ...fx.map((x) => x[1]));
   $("#gIdade").innerHTML = `<div class="cols">${fx.map(([l, n], i) => `<div class="col${i === 3 && n ? " hot" : ""}"><b>${n}</b><div class="h"><i style="height:${(n / mf) * 100}%"></i></div><span>${l}</span></div>`).join("")}</div>`;
@@ -942,16 +996,14 @@ async function carregarPainel() {
   const ix = (ts) => Math.floor((new Date(ts) - ini0) / (864e5 * passo));
   L.forEach((r) => { const i = ix(r.aberta_em); if (i >= 0 && i < n) ab[i]++; if (r.confirmada_em) { const j = ix(r.confirmada_em); if (j >= 0 && j < n) co[j]++; } });
   const mb = Math.max(1, ...ab, ...co), rot = (i) => new Date(ini0.getTime() + i * passo * 864e5).toLocaleDateString("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit" });
-  $("#gSerie").innerHTML = `<div class="series">${ab.map((a, i) => `<div><div class="pair"><i style="height:${(a / mb) * 100}%;background:#C4C7CC"><em>${a || ""}</em></i><i style="height:${(co[i] / mb) * 100}%;background:var(--s-concluida)"><em>${co[i] || ""}</em></i></div><span>${i % Math.ceil(n / 8) === 0 ? rot(i) : ""}</span></div>`).join("")}</div>
-    <div class="legend" style="grid-template-columns:repeat(2,max-content);gap:18px"><div style="grid-template-columns:10px auto"><i style="background:#C4C7CC"></i><span>Abertas</span></div><div style="grid-template-columns:10px auto"><i style="background:var(--s-concluida)"></i><span>Concluídas</span></div></div>`;
+  $("#gSerie").innerHTML = linhas(ab.map((_, i) => rot(i)), [{ l: "Abertas", v: ab, c: "#DF2331" }, { l: "Concluídas", v: co, c: "#1E8E4E" }], { largura: $("#gSerie").clientWidth || 640, alt: isMob() ? 200 : 240 });
 
   // classificação
   const KP = [...Object.keys(PRIO), null], rotP = (k) => (k ? PRIO[k].rot : "A classificar");
   const fila = KP.map((k) => ({ l: rotP(k), v: A.filter((o) => (o.prioridade ?? null) === k).length, c: PCOR[k] || "#D6D6D1" }));
   $("#gFila").innerHTML = barras(fila, Math.max(1, ...fila.map((x) => x.v)));
   const mix = KP.map((k) => ({ k, v: L.filter((r) => (r.prioridade ?? null) === k).length })).filter((x) => x.v);
-  $("#gMix").innerHTML = L.length ? `<div class="stacked">${mix.map((x) => `<i style="flex:${x.v};background:${PCOR[x.k] || "#D6D6D1"}"></i>`).join("")}</div>
-    <div class="legend">${mix.map((x) => `<div><i style="background:${PCOR[x.k] || "#D6D6D1"}"></i><span>${rotP(x.k)}</span><b>${x.v} OS</b><em>${pct(x.v, L.length)}%</em></div>`).join("")}</div>` : `<div class="zero">Sem OS no período.</div>`;
+  $("#gMix").innerHTML = donutBloco(mix.map((x) => ({ l: rotP(x.k), v: x.v, c: PCOR[x.k] || "#CFC7BE" })), { centro: L.length, sub: "OS no período" });
   const porP = (campo, base) => Object.keys(PRIO).map((k) => { const g = base.filter((r) => r.prioridade === k); return { l: PRIO[k].rot, c: PCOR[k], m: mediana(g.map((r) => r[campo])), n: g.length }; });
   const cm = porP("min_ate_inicio", L), lp = porP("min_lead_total", concl);
   $("#gComeca").innerHTML = barras(cm.map((x) => ({ l: x.l, v: x.m || 0, txt: fmtMin(x.m), c: x.c, e: `${x.n} OS` })), Math.max(1, ...cm.map((x) => x.m || 0)));
@@ -1234,6 +1286,11 @@ function desenharRelatorio(R) {
         ${met("Resposta média", fmtMin(k.resposta), "do direcionamento ao início")}
         ${met("Lead médio", fmtMin(k.lead), "da abertura à confirmação")}</div></section>
     </div>
+    <div class="rel-graf">
+      <section><h4>Situação das OS do período</h4>${donutBloco([{ l: "Concluídas", v: k.concl, c: "#1E8E4E" }, { l: "Em andamento", v: k.andamento, c: "#E8A317" }, { l: "Sem início", v: k.semInicio, c: "#DF2331" }], { centro: k.abertas, sub: "OS abertas", tam: 150, esp: 18 })}</section>
+      <section><h4>Finalização</h4>${medidor(k.pct, { rot: `${k.concl} de ${k.abertas} OS`, cor: k.pct >= 80 ? "#1E8E4E" : k.pct >= 60 ? "#E8A317" : "#DF2331" })}</section>
+      <section><h4>Horas trabalhadas por manutentor</h4>${R.porMnt.length ? barras(R.porMnt.map((l) => ({ l: esc(l[0]), v: l[2], txt: fmtHoras(l[2]), c: "#DF2331" })), Math.max(1, ...R.porMnt.map((l) => l[2]))) : `<div class="zero">Sem atendimentos.</div>`}</section>
+    </div>
     ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
       R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
       R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
@@ -1265,11 +1322,11 @@ async function exportarPDF() {
   await carregarScript("jspdf.umd.min.js", () => window.jspdf);
   await carregarScript("jspdf.plugin.autotable.min.js", () => window.jspdf?.jsPDF?.API?.autoTable);
   const R = S.rel, k = R.k, { jsPDF } = window.jspdf, doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
-  const W = 210, M = 14, VERM = [215, 31, 43], TINTA = [18, 20, 23], CINZA = [106, 110, 117];
+  const W = 210, M = 14, VERM = [223, 35, 49], TINTA = [34, 27, 23], CINZA = [124, 113, 105], VINHO = [126, 12, 22], OURO = [242, 181, 27];
   const logo = await logoDataURL();
   // cabeçalho
-  doc.setFillColor(...TINTA); doc.rect(0, 0, W, 30, "F");
-  doc.setFillColor(...VERM); doc.rect(0, 30, W, 1.2, "F");
+  doc.setFillColor(...VINHO); doc.rect(0, 0, W, 30, "F");
+  doc.setFillColor(...OURO); doc.rect(0, 30, W, 1.2, "F");
   doc.addImage(logo, "PNG", M, 6.5, 34, 17);
   doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(15);
   doc.text("Relatório de Manutenção das Granjas", 54, 14);
@@ -1295,7 +1352,7 @@ async function exportarPDF() {
     doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(tit, M, y);
     doc.autoTable({ startY: y + 2.5, head: [head], body: body.length ? body : [[{ content: "Nada no período.", colSpan: head.length, styles: { halign: "center", textColor: CINZA } }]], margin: { left: M, right: M },
       styles: { font: "helvetica", fontSize: 8, cellPadding: 1.8, textColor: TINTA, lineColor: [230, 230, 226], lineWidth: 0.1 },
-      headStyles: { fillColor: TINTA, textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [247, 247, 245] }, columnStyles: cols });
+      headStyles: { fillColor: VINHO, textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [251, 248, 244] }, columnStyles: cols });
     y = doc.lastAutoTable.finalY + 9;
   };
   const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
