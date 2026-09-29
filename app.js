@@ -52,6 +52,8 @@ const P = {
   coffee: '<path d="M10 2v2M14 2v2M6 2v2M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   dots: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  wifioff: '<path d="M12 20h.01M8.5 16.43a5 5 0 0 1 7 0M2 8.82a15 15 0 0 1 4.17-2.65M10.66 5c4.01-.36 8.14.9 11.34 3.76M16.85 11.25a10 10 0 0 1 2.22 1.68M5 13a10 10 0 0 1 5.24-2.76M2 2l20 20"/>',
   bell: '<path d="M10.27 21a2 2 0 0 0 3.46 0M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4M10 9H8M16 13H8M16 17H8"/>',
   camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
@@ -180,19 +182,71 @@ function telaLogin(msg = "") {
   };
 }
 
+// usuários sem a foto (a lista fica leve mesmo com muita gente); as fotos vêm do cache local e só baixam quando mudam
+const COLS_USU = "id,nome,login,perfis,ativo,excluido_em,foto_em";
+async function carregarUsuarios() {
+  const { data, error } = await sb.from("usuarios").select(COLS_USU).order("nome");
+  if (error) throw error;
+  let cache = {}; try { cache = JSON.parse(localStorage.getItem("osg_fotos") || "{}"); } catch {}
+  const faltam = data.filter((u) => u.foto_em && cache[u.id]?.em !== u.foto_em).map((u) => u.id);
+  if (faltam.length) {
+    const { data: f } = await sb.from("usuarios").select("id,foto,foto_em").in("id", faltam);
+    (f || []).forEach((x) => (cache[x.id] = { em: x.foto_em, foto: x.foto }));
+    try { localStorage.setItem("osg_fotos", JSON.stringify(cache)); } catch {}
+  }
+  S.usuarios = Object.fromEntries(data.map((u) => [u.id, { ...u, foto: u.foto_em ? cache[u.id]?.foto || null : null }]));
+}
 async function iniciar() {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) return telaLogin();
-  const { data: eu } = await sb.from("usuarios").select("*").eq("id", session.user.id).maybeSingle();
-  if (!eu?.ativo || !eu.perfis.length) { await sb.auth.signOut(); return telaLogin("Seu usuário não tem acesso liberado."); }
+  const { data: eu } = await sb.from("usuarios").select(COLS_USU).eq("id", session.user.id).maybeSingle();
+  if (!eu?.ativo || eu.excluido_em || !eu.perfis.length) { await sb.auth.signOut(); return telaLogin("Seu usuário não tem acesso liberado. Procure o administrador."); }
   S.eu = eu;
-  const [n, g, u] = await Promise.all([sb.from("nucleos").select("*").order("nome"), sb.from("galpoes").select("*").order("numero"), sb.from("usuarios").select("*").order("nome")]);
+  const [n, g, c, j] = await Promise.all([sb.from("nucleos").select("*").order("nome"), sb.from("galpoes").select("*").order("numero"),
+    sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios()]);
   S.nucleos = n.data.map((x) => ({ ...x, galpoes: g.data.filter((y) => y.nucleo_id === x.id).map((y) => y.numero) }));
   S.nucleoPorId = Object.fromEntries(S.nucleos.map((x) => [x.id, x]));
-  S.usuarios = Object.fromEntries(u.data.map((x) => [x.id, x]));
+  S.carros = (c.data || []).filter((x) => x.ativo);
+  S.jornada = j.data || { fim_expediente: "17:00:00", almoco_max_min: 120 };
+  MOTIVOS.ALMOCO.lim = S.jornada.almoco_max_min;
+  vigiarAcesso();
   const r = rotas();
   ir(r.find((x) => x.id === S.rota) ? S.rota : r[0].id);
 }
+// Bloqueio vale na hora: o banco já nega os dados; aqui o app confere o acesso a cada minuto e ao voltar para a tela
+function vigiarAcesso() {
+  clearInterval(vigiarAcesso.t);
+  const conferir = async () => {
+    if (!S.eu) return;
+    const { data, error } = await sb.from("usuarios").select("ativo,excluido_em").eq("id", S.eu.id).maybeSingle();
+    if (error && !/fetch|network/i.test(error.message || "")) return sair("Sua sessão expirou. Entre novamente.");
+    if (!error && (!data || !data.ativo || data.excluido_em)) return sair("Seu acesso foi retirado pelo administrador.");
+  };
+  vigiarAcesso.t = setInterval(conferir, 60000);
+  if (!vigiarAcesso.ligado) { vigiarAcesso.ligado = true; document.addEventListener("visibilitychange", () => { if (!document.hidden) conferir(); }); }
+}
+// Atualizar: botão no topo e automático ao voltar para o app depois de alguns minutos
+async function atualizarTudo() {
+  const b = $("#btnAtualizar"); b?.classList.add("girando");
+  try { await carregarUsuarios(); recarregar(); toast("Atualizado."); } catch (e) { toast(errMsg(e), true); }
+  setTimeout(() => $("#btnAtualizar")?.classList.remove("girando"), 600);
+}
+let saiuEm = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { saiuEm = Date.now(); return; }
+  if (S.eu && saiuEm && Date.now() - saiuEm > 120000 && !$(".sheet-wrap") && !$(".page")) recarregar();
+});
+// Sem internet: faixa no topo; ao voltar, atualiza sozinho
+function avisoConexao() {
+  let f = $("#offline");
+  if (!f) { f = document.createElement("div"); f.id = "offline"; f.innerHTML = `${ic("wifioff")}<span><b>Sem internet.</b> Você pode ver o que já está na tela, mas abrir, direcionar, iniciar, pausar ou finalizar só funciona com conexão.</span>`; document.body.appendChild(f); }
+  f.classList.toggle("on", !navigator.onLine);
+}
+addEventListener("offline", avisoConexao);
+addEventListener("online", () => { avisoConexao(); if (S.eu) { toast("Conexão restabelecida."); recarregar(); } });
+async function sair(msg) { clearInterval(vigiarAcesso.t); S.eu = null; $$(".sheet-wrap, .page").forEach((x) => x.remove()); await sb.auth.signOut(); telaLogin(msg); }
+// a rolagem acontece dentro do app (não na página), o que mantém a barra inferior no lugar no iOS e no Android
+const rolagem = () => $(".main") || document.scrollingElement;
 
 /* ---------------- navegação ---------------- */
 function rotas() {
@@ -200,7 +254,7 @@ function rotas() {
   if (tem("tecnico") || tem("gestor") || tem("manutentor")) r.push({ id: "inicio", rot: "Início", i: "home" });
   r.push({ id: "ordens", rot: tem("tecnico") && !podeVerTudo() ? "Minhas OS" : tem("manutentor") && !podeVerTudo() ? "Histórico" : "Ordens", i: "list" });
   if (podeVerTudo()) r.push({ id: "painel", rot: "Painel", i: "chart" });
-  if (tem("admin")) r.push({ id: "usuarios", rot: "Usuários", i: "users" });
+  if (tem("admin")) r.push({ id: "controles", rot: "Controles", i: "box" }, { id: "usuarios", rot: "Usuários", i: "users" });
   if (podeVerTudo()) r.splice(r.findIndex((x) => x.id === "painel") + 1, 0, { id: "relatorios", rot: "Relatórios", i: "file" });
   if (tem("gerente") && !tem("gestor") && !tem("admin")) r.unshift(r.splice(r.findIndex((x) => x.id === "painel"), 1)[0]);
   return r;
@@ -211,6 +265,7 @@ const TITULOS = {
   painel: () => ["Painel", "Tempos, classificação, equipe e locais"],
   usuarios: () => ["Usuários", "Quem acessa o sistema e o que pode fazer"],
   relatorios: () => ["Relatórios", "Resumo consolidado para exportar em PDF ou Excel"],
+  controles: () => ["Controles", "Materiais dos carros e jornada da equipe"],
 };
 function ir(id) {
   S.rota = id; S.sel = null; S.tok++;
@@ -228,6 +283,7 @@ function ir(id) {
         <div><h1>${t}</h1><div class="sub">${sub}</div></div>
         <div class="grow"></div>
         ${tem("tecnico") ? `<button class="btn btn-brand btn-sm desk-only" id="btnNovaTop">${ic("plus")}Nova OS</button>` : ""}
+        <button class="bell" id="btnAtualizar" aria-label="Atualizar" title="Atualizar">${ic("refresh")}</button>
         <button class="bell" id="btnAvisos" aria-label="Avisos">${ic("bell")}<span class="bell-n" id="bellN" hidden></span></button>
         <div class="who"><div class="txt"><b>${esc(S.eu.nome)}</b><small>${S.eu.perfis.map((p) => PERFIS[p].nome).join(" · ")}</small></div>
           <button class="av-btn mob-only" id="btnPerfilM">${av(S.eu.id)}</button></div>
@@ -235,11 +291,12 @@ function ir(id) {
       <div id="view"></div>
     </div>
   </div>`;
-  $(".rail").onclick = (e) => { const a = e.target.closest("[data-r]"); if (a) { e.preventDefault(); ir(a.dataset.r); window.scrollTo(0, 0); } };
+  $(".rail").onclick = (e) => { const a = e.target.closest("[data-r]"); if (a) { e.preventDefault(); ir(a.dataset.r); rolagem().scrollTop = 0; } };
   $("#btnPerfil").onclick = $("#btnPerfilM").onclick = folhaPerfil;
   $("#btnNovaTop")?.addEventListener("click", novaOS);
   $("#btnAvisos").onclick = () => folhaAvisos();
-  ({ inicio: viewInicio, ordens: viewOrdens, painel: viewPainel, usuarios: viewUsuarios, relatorios: viewRelatorios })[id]();
+  $("#btnAtualizar").onclick = atualizarTudo;
+  ({ inicio: viewInicio, ordens: viewOrdens, painel: viewPainel, usuarios: viewUsuarios, relatorios: viewRelatorios, controles: viewControles })[id]();
   atualizarBadges();
 }
 /* ---------------- avisos (pendências de cada perfil) ---------------- */
@@ -257,7 +314,7 @@ async function pendencias() {
     data.forEach((o) => {
       const ult = at.filter((a) => a.os_id === o.id).sort((a, b) => b.ciclo - a.ciclo)[0];
       if (o.status === "ABERTA") add(o, "direcionar", `Nova OS para direcionar · ${osId(o.id)}`, `${o.descricao} — ${nomeN(o.nucleo_id)}`);
-      else add(o, "devolvida", `${ult?.resultado === "RECUSADO" ? "Recusada pelo manutentor" : "Não resolvida"} · ${osId(o.id)}`, ult?.motivo_recusa ? `Motivo: ${ult.motivo_recusa}` : `${o.descricao} — direcione novamente.`);
+      else add(o, "devolvida", `${ult?.resultado === "RECUSADO" ? "Recusada pelo manutentor" : ult?.resultado === "DEVOLVIDO" ? "Devolvida pelo administrador" : "Não resolvida"} · ${osId(o.id)}`, ult?.motivo_recusa ? `Motivo: ${ult.motivo_recusa}` : `${o.descricao} — direcione novamente.`);
     });
     const { data: ab } = await q().in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).range(0, 999);
     ab.filter(pausaLonga).forEach((o) => add(o, "pausa", `Pausa longa · ${osId(o.id)}`, `${nomeU(o.manutentor_id)}: ${MOTIVOS[o.pausa_motivo].rot.toLowerCase()} há ${fmtMin(pausaMin(o))}.`));
@@ -346,8 +403,8 @@ function folhaPerfil() {
       <div class="label">O que você pode fazer</div><div class="checks">${S.eu.perfis.map((p) => `<label>${esc(PERFIS[p].nome)}<small>${PERFIS[p].faz}</small></label>`).join("")}</div>`,
     rodape: `<button class="btn" data-fechar>Fechar</button><button class="btn btn-primary" id="btnSair">${ic("logout")}Sair</button>`,
     aoAbrir: (el, fechar) => {
-      $("#btnSair", el).onclick = async () => { fechar(); await sb.auth.signOut(); telaLogin(); };
-      const salvar = async (foto) => { await rpc("definir_foto", { p_foto: foto }); S.usuarios[S.eu.id].foto = foto; fechar(); toast(foto ? "Foto atualizada." : "Foto removida."); recarregar(); };
+      $("#btnSair", el).onclick = async () => { fechar(); sair(); };
+      const salvar = async (foto) => { await rpc("definir_foto", { p_foto: foto }); await carregarUsuarios(); fechar(); toast(foto ? "Foto atualizada." : "Foto removida."); recarregar(); };
       $("#rmFoto", el)?.addEventListener("click", () => salvar(null).catch((e) => toast(errMsg(e), true)));
       $("#fFoto", el).onchange = async (e) => {
         const f = e.target.files[0]; if (!f) return;
@@ -395,7 +452,7 @@ function sucesso({ titulo, texto, linhas = [], primario, secundario }) {
     },
   });
 }
-function recarregar() { const sel = S.sel; const y = window.scrollY; ir(S.rota); if (sel && !isMob()) abrirOS(sel); window.scrollTo(0, y); atualizarBadges(); }
+function recarregar() { const sel = S.sel; const y = rolagem().scrollTop; ir(S.rota); if (sel && !isMob()) abrirOS(sel); rolagem().scrollTop = y; atualizarBadges(); }
 /* ---------------- cartão de OS ---------------- */
 function acoesRapidas(o) {
   const b = (a, rot, cls = "", i = "") => `<button class="btn btn-sm ${cls}" data-acao="${a}" data-id="${o.id}">${i ? ic(i) : ""}${rot}</button>`;
@@ -515,28 +572,29 @@ async function viewOrdens() {
       <div id="res" class="stack"><div class="skel"></div><div class="skel"></div></div>
       <button class="btn btn-sm more" id="mais" hidden>Mostrar mais</button>
     </div><div class="pane-detail" id="pd">${vazioDetalhe()}</div></div>`;
-  let limite = 30, dados = [];
+  let limite = 30, total = 0;
   const tok = S.tok;
   const escopo = (q) => { if (!podeVerTudo()) q = tem("tecnico") ? q.eq("solicitante_id", S.eu.id) : q.eq("manutentor_id", S.eu.id); return L.nuc ? q.eq("nucleo_id", +L.nuc) : q; };
   const pintarRot = () => { const g = rotG(); $("#mostrarRot").innerHTML = `${ic(g[2])}${g[1]}${cont[g[0]] != null ? `<b>${cont[g[0]]}</b>` : ""}`; };
   async function contar() {
-    const { data } = await escopo(sb.from("ordens_servico").select("id,status,prioridade")).range(0, 19999);
+    // o banco devolve só os totais por status e classificação (poucas linhas, mesmo com milhares de OS)
+    const { data } = await sb.rpc("contagem_os", { p_nucleo: L.nuc ? +L.nuc : null,
+      p_solicitante: !podeVerTudo() && tem("tecnico") ? S.eu.id : null, p_manutentor: !podeVerTudo() && !tem("tecnico") ? S.eu.id : null });
     if (tok !== S.tok || !data) return;
-    cont = Object.fromEntries(GRUPOS().map((g) => [g[0], data.filter(g[4]).length]));
+    cont = Object.fromEntries(GRUPOS().map((g) => [g[0], data.filter((x) => g[4](x)).reduce((a2, x) => a2 + Number(x.qtd), 0)]));
     $$("#folders [data-c]").forEach((b) => (b.textContent = cont[b.dataset.c]));
     pintarRot();
   }
   async function buscar() {
-    const { data, error } = await rotG()[3](escopo(sb.from("ordens_servico").select(CAMPOS))).order("id", { ascending: false }).range(0, 999);
+    // só a página visível vem do banco; a busca também é feita no banco
+    let q = rotG()[3](escopo(sb.from("ordens_servico").select(CAMPOS)));
+    const t = L.q.trim().replace(/[%*,()]/g, " ").trim(), num = t.toLowerCase().replace(/^os-?0*/, "");
+    if (t) q = /^\d+$/.test(num) ? q.eq("id", +num) : q.or(`descricao.ilike.*${t}*,equipamento.ilike.*${t}*`);
+    const { data, error } = await q.order("id", { ascending: false }).range(0, limite);
     if (tok !== S.tok) return;
     if (error) return toast(errMsg(error), true);
-    dados = data; desenhar();
-  }
-  function desenhar() {
-    const t = L.q.trim().toLowerCase().replace(/^os-?0*/, "");
-    const f = !t ? dados : dados.filter((o) => String(o.id) === t || `${o.descricao} ${o.equipamento || ""} ${nomeN(o.nucleo_id)}`.toLowerCase().includes(t));
-    $("#res").innerHTML = f.length ? f.slice(0, limite).map((o) => card(o)).join("") : `<div class="zero">Nenhuma OS encontrada com esses filtros.</div>`;
-    $("#mais").hidden = f.length <= limite;
+    $("#res").innerHTML = data.length ? data.slice(0, limite).map((o) => card(o)).join("") : `<div class="zero">Nenhuma OS encontrada com esses filtros.</div>`;
+    $("#mais").hidden = data.length <= limite;
   }
   const escolher = (k) => { L.grupo = k; $$("#folders button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.g === k)); pintarRot(); limite = 30; buscar(); };
   $("#folders").onclick = (e) => { const b = e.target.closest("[data-g]"); if (b) escolher(b.dataset.g); };
@@ -544,9 +602,9 @@ async function viewOrdens() {
   $("#btnMostrar").onclick = () => folha({ titulo: "Mostrar", corpo: `<div class="folders-v">${GRUPOS().map(([k, r, i]) =>
       `<button data-g="${k}" aria-pressed="${k === L.grupo}">${ic(i)}<span>${r}</span><b>${cont[k] ?? ""}</b>${k === L.grupo ? ic("check") : ""}</button>`).join("")}</div>`,
     aoAbrir: (el, fechar) => { $(".folders-v", el).onclick = (e) => { const b = e.target.closest("[data-g]"); if (b) { fechar(); escolher(b.dataset.g); } }; } });
-  $("#busca").oninput = (e) => { L.q = e.target.value; limite = 30; desenhar(); };
+  $("#busca").oninput = (e) => { L.q = e.target.value; limite = 30; clearTimeout(viewOrdens.t); viewOrdens.t = setTimeout(buscar, 350); };
   $("#fNuc")?.addEventListener("change", (e) => { L.nuc = e.target.value; contar(); buscar(); });
-  $("#mais").onclick = () => { limite += 30; desenhar(); };
+  $("#mais").onclick = () => { limite += 30; buscar(); };
   $("#btnNovaL")?.addEventListener("click", novaOS);
   ligarLista($("#res"));
   pintarRot(); contar(); buscar();
@@ -626,7 +684,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
   const pos = T.indexOf(o.status), pend = o.status === "PENDENTE DE ATENDIMENTO";
   const steps = T.map((_, i) => `<div class="${pend ? (i === 0 ? "on" : i === 1 ? "bad" : "") : i <= pos ? "on" : ""}"><i></i>${TR[i]}${quando[i] && (pend ? i === 0 : i <= pos) ? `<small>${fmtDH(quando[i])}</small>` : ""}</div>`).join("");
   const ult = [...hist].reverse().find((h) => h.status === "PENDENTE DE ATENDIMENTO");
-  const RES = { CONFIRMADO: ["ok", "Resolvido"], NAO_RESOLVIDO: ["bad", "Não resolvido"], RECUSADO: ["bad", "Recusada"] };
+  const RES = { CONFIRMADO: ["ok", "Resolvido"], NAO_RESOLVIDO: ["bad", "Não resolvido"], RECUSADO: ["bad", "Recusada"], DEVOLVIDO: ["", "Devolvida pelo administrador"] };
   const ciclos = [...at].reverse().map((a) => `<div class="cycle">
     <div class="cycle-h">${av(a.manutentor_id, "sm")}<b>${esc(nomeU(a.manutentor_id))}</b><small>Atendimento ${a.ciclo}</small>${a.resultado ? `<span class="tag ${RES[a.resultado][0]}">${RES[a.resultado][1]}</span>` : a.finalizada_em ? `<span class="tag">Aguardando técnico</span>` : `<span class="tag">Em curso</span>`}</div>
     <small>Direcionada ${fmtDH(a.direcionada_em)}${a.iniciada_em ? ` · início ${fmtDH(a.iniciada_em)}` : ""}${a.finalizada_em ? ` · término ${fmtDH(a.finalizada_em)}` : ""}</small>
@@ -637,7 +695,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
         <ul class="mats">${pz.map((p) => `<li><span>${ic(MOTIVOS[p.motivo].i)} ${MOTIVOS[p.motivo].rot}${p.detalhe ? `<small class="muted">${esc(p.detalhe)}</small>` : ""}</span><b>${p.fim ? fmtMin((new Date(p.fim) - new Date(p.inicio)) / 6e4) : "em pausa"}</b></li>`).join("")}</ul></div>`; })()}
     ${a.motivo_recusa ? `<div class="kv"><b>Motivo da recusa</b><p>${esc(a.motivo_recusa)}</p></div>` : ""}
     ${a.servico_realizado ? `<div class="kv"><b>O que foi feito</b><p>${esc(a.servico_realizado)}</p></div>` : ""}
-    ${a.finalizada_em ? `<div class="kv"><b>Material do estoque do carro</b>${a.materiais_carro?.length ? `<ul class="mats">${a.materiais_carro.map((m) => `<li><span>${esc(m.material)}<small class="muted mono">${esc(m.codigo)}${m.controle ? ` · ${esc(m.controle)}` : ""}</small></span><b>${m.quantidade} ${esc(m.unidade)}</b></li>`).join("")}</ul>` : `<p class="muted">Não usou</p>`}</div>` : ""}
+    ${a.finalizada_em ? `<div class="kv"><b>Material do estoque do carro${a.materiais_carro?.[0]?.almoxarifado ? ` · carro ${a.materiais_carro[0].almoxarifado}` : ""}</b>${a.materiais_carro?.length ? `<ul class="mats">${a.materiais_carro.map((m) => `<li><span>${esc(m.material)}<small class="muted mono">${esc(m.codigo)}${m.controle ? ` · ${esc(m.controle)}` : ""}</small></span><b>${m.quantidade} ${esc(m.unidade)}</b></li>`).join("")}</ul>` : `<p class="muted">Não usou</p>`}</div>` : ""}
   </div>`).join("");
   const EVI = { "OS aberta": "inbox", "Direcionada": "send", "Redirecionada após pendência": "send", "Atendimento iniciado": "play", "Atendimento finalizado": "flag",
     "Serviço confirmado pelo técnico": "checkc", "Técnico informou que não foi resolvido": "undo", "Recusada pelo manutentor": "undo", "Classificação alterada": "alert", "Atendimento pausado": "pause", "Atendimento retomado": "play" };
@@ -670,7 +728,9 @@ async function executar(acao, id, btn) {
   if (acao === "iniciar") return busy(btn, async () => { const r = await rpc("iniciar_atendimento", { p_os: id });
     toast(r?.pausou ? `Atendimento iniciado. ${osId(r.pausou)} foi pausada automaticamente.` : "Atendimento iniciado. Bom trabalho!"); recarregar(); if (isMob()) abrirOS(id); });
   if (acao === "retomar") return busy(btn, async () => { const r = await rpc("retomar_atendimento", { p_os: id });
-    toast(`Atendimento retomado após ${fmtMin(r.minutos)} de pausa.${r.pausou ? ` ${osId(r.pausou)} foi pausada.` : ""}`); recarregar(); if (isMob()) abrirOS(id); });
+    const exc = o.pausa_motivo === "ALMOCO" ? r.minutos - (S.jornada?.almoco_max_min || 120) : 0;
+    toast(exc > 0 ? `Retomado. O almoço passou ${fmtMin(exc)} do padrão de ${fmtMin(S.jornada?.almoco_max_min || 120)} e ficará registrado.` : `Atendimento retomado após ${fmtMin(r.minutos)} de pausa.${r.pausou ? ` ${osId(r.pausou)} foi pausada.` : ""}`, exc > 0);
+    recarregar(); if (isMob()) abrirOS(id); });
   if (acao === "pausar") return folhaPausa(o);
   if (acao === "confirmar") return busy(btn, async () => { await rpc("confirmar_os", { p_os: id, p_resolvido: true }); fim(`${osId(id)} concluída`, "Obrigado por confirmar. O atendimento foi encerrado.", resumo); });
   if (acao === "direcionar") return folhaDirecionar(o, fim);
@@ -738,6 +798,8 @@ function folhaFinalizar(o, fim) {
       <div class="label">Material do estoque do carro</div>
       <div class="choice" id="usou"><button type="button" data-v="nao" aria-pressed="false">Não usei</button><button type="button" data-v="sim" aria-pressed="false">Usei material do carro</button></div>
       <div class="note"><b>Só o que saiu do seu carro.</b> Material retirado do almoxarifado já tem o custo lançado automaticamente e não deve ser registrado aqui.</div>
+      <div id="blocoCarro" hidden><div class="label">De qual carro saiu o material? <span class="obrig">obrigatório</span></div>
+        <div class="carros" id="carros">${(S.carros || []).map((c) => `<button type="button" data-c="${c.codigo}" aria-pressed="false"><small>Almox.</small>${c.codigo}</button>`).join("")}</div></div>
       <div id="mats" hidden></div><button type="button" class="btn btn-sm" id="addM" hidden>${ic("plus")}Adicionar produto</button>
       <p class="err" id="erroF"></p>`,
     rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okF">${ic("flag")}Finalizar</button>`,
@@ -745,8 +807,11 @@ function folhaFinalizar(o, fim) {
       let usou = null;
       $("#usou", el).onclick = (e) => { const b = e.target.closest("[data-v]"); if (!b) return; usou = b.dataset.v;
         $$("#usou button", el).forEach((x) => x.setAttribute("aria-pressed", x === b));
-        $("#mats", el).hidden = $("#addM", el).hidden = usou !== "sim";
+        $("#mats", el).hidden = $("#addM", el).hidden = $("#blocoCarro", el).hidden = usou !== "sim";
         if (usou === "sim" && !$("#mats", el).children.length) $("#mats", el).insertAdjacentHTML("beforeend", linha()); };
+      let carro = null;
+      $("#carros", el).onclick = (e) => { const b = e.target.closest("[data-c]"); if (!b) return; carro = +b.dataset.c;
+        $$("#carros button", el).forEach((x) => x.setAttribute("aria-pressed", x === b)); $("#erroF", el).textContent = ""; };
       $("#addM", el).onclick = () => $("#mats", el).insertAdjacentHTML("beforeend", linha());
       $("#mats", el).onclick = (e) => { if (e.target.closest(".rm")) e.target.closest(".mat").remove(); };
       $("#okF", el).onclick = (e) => {
@@ -757,8 +822,9 @@ function folhaFinalizar(o, fim) {
           controle: $(".m-ctrl", m).value.trim() || null, quantidade: +$(".m-qtd", m).value, unidade: $(".m-un", m).value })).filter((m) => m.codigo || m.material || m.quantidade);
         if (usou === "sim" && !mats.length) return err("Adicione pelo menos um produto ou marque \"Não usei\".");
         if (mats.some((m) => !m.codigo || !m.material || !(m.quantidade > 0))) return err("Preencha código, produto e quantidade de cada item.");
-        busy(e.currentTarget, async () => { await rpc("finalizar_atendimento", { p_os: o.id, p_servico: serv, p_materiais: mats }); fechar();
-          fim(`Atendimento de ${osId(o.id)} finalizado`, "Enviada para o técnico confirmar se foi resolvido.", [["O que foi feito", esc(serv)], ["Material do carro", mats.length ? `${mats.length} produto(s)` : "Não usou"]]); });
+        if (mats.length && !carro) { $("#blocoCarro", el).scrollIntoView({ behavior: "smooth", block: "center" }); return err("Selecione o código do carro de onde saiu o material."); }
+        busy(e.currentTarget, async () => { await rpc("finalizar_atendimento", { p_os: o.id, p_servico: serv, p_materiais: mats, p_almoxarifado: mats.length ? carro : null }); fechar();
+          fim(`Atendimento de ${osId(o.id)} finalizado`, "Enviada para o técnico confirmar se foi resolvido.", [["O que foi feito", esc(serv)], ["Material do carro", mats.length ? `${mats.length} produto(s) · carro ${carro}` : "Não usou"]]); });
       };
     },
   });
@@ -769,11 +835,14 @@ function folhaPausa(o) {
     corpo: `<div class="people" id="motivos">${Object.entries(MOTIVOS).filter(([k]) => k !== "OUTRA_OS").map(([k, m]) =>
         `<button type="button" class="person" data-m="${k}" aria-checked="false"><span class="avatar" style="background:var(--surface-2);color:var(--ink-2)">${ic(m.i)}</span><span><b>${m.rot}</b>${m.lim ? `<small>alerta se passar de ${fmtMin(m.lim)}</small>` : ""}</span></button>`).join("")}</div>
       <label class="field" style="margin-top:12px"><span>Detalhe <em id="detOpc">(opcional)</em></span><input class="input" id="pDet" maxlength="120" placeholder="Ex.: disjuntor 3x40A pedido ao almoxarifado"></label>
-      <p class="muted" style="font-size:12.5px">Para atender outra OS, não precisa pausar: ao iniciar a outra, esta é pausada automaticamente.</p><p class="err" id="erroP"></p>`,
+      <div class="note" id="infoAlmoco" hidden></div>
+      <p class="muted" style="font-size:12.5px">O horário de início e de retorno é registrado automaticamente. Para atender outra OS, não precisa pausar: ao iniciar a outra, esta é pausada sozinha.</p><p class="err" id="erroP"></p>`,
     rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okP">${ic("pause")}Pausar</button>`,
     aoAbrir: (el, fechar) => {
       marcar($("#motivos", el), ".person");
-      $("#motivos", el).addEventListener("click", () => { const m = $(".person[aria-checked=true]", el)?.dataset.m; $("#detOpc", el).textContent = m === "OUTRO" ? "(obrigatório)" : "(opcional)"; });
+      $("#motivos", el).addEventListener("click", () => { const m = $(".person[aria-checked=true]", el)?.dataset.m; $("#detOpc", el).textContent = m === "OUTRO" ? "(obrigatório)" : "(opcional)";
+        const lim = S.jornada?.almoco_max_min || 120, volta = new Date(Date.now() + lim * 6e4).toLocaleTimeString("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
+        $("#infoAlmoco", el).hidden = m !== "ALMOCO"; $("#infoAlmoco", el).innerHTML = `<b>Almoço padrão: ${fmtMin(lim)}.</b> Retorno previsto até <b>${volta}</b>. Passando disso, a diferença fica registrada para o administrador.`; });
       $("#okP", el).onclick = (e) => {
         const m = $(".person[aria-checked=true]", el)?.dataset.m, d = $("#pDet", el).value.trim();
         if (!m) return ($("#erroP", el).textContent = "Escolha o motivo da pausa.");
@@ -1059,10 +1128,11 @@ async function carregarPainel() {
 
   // materiais
   const mt = {}; L.forEach((r) => (r.materiais_carro || []).forEach((m) => { const k = `${String(m.codigo).toUpperCase()}|${m.unidade}`;
-    (mt[k] ??= { c: m.codigo, n: m.material, u: m.unidade, q: 0, os: new Set() }).q += +m.quantidade; mt[k].os.add(r.id); }));
+    (mt[k] ??= { c: m.codigo, n: m.material, u: m.unidade, q: 0, os: new Set(), locais: {} }).q += +m.quantidade; mt[k].os.add(r.id);
+    const lc = (mt[k].locais[r.nucleo_id] ??= { todo: false, av: new Set() }); if (!(r.galpoes || []).length) lc.todo = true; (r.galpoes || []).forEach((x) => lc.av.add(x)); }));
   const lm = Object.values(mt).sort((a, b) => b.os.size - a.os.size);
-  $("#gMat").innerHTML = lm.length ? `<div class="tbl"><table class="t"><thead><tr><th>Código</th><th>Produto</th><th class="n">Quantidade</th><th class="n">OS</th></tr></thead>
-    <tbody>${lm.map((m) => `<tr><td class="mono">${esc(m.c)}</td><td>${esc(m.n)}</td><td class="n">${m.q.toLocaleString("pt-BR")} ${esc(m.u)}</td><td class="n">${m.os.size}</td></tr>`).join("")}</tbody></table></div>` : `<div class="zero">Nenhum material de carro no período.</div>`;
+  $("#gMat").innerHTML = lm.length ? `<div class="tbl"><table class="t"><thead><tr><th>Código</th><th>Produto</th><th class="n">Quantidade</th><th>Onde foi usado (granja / aviário)</th><th class="n">OS</th></tr></thead>
+    <tbody>${lm.map((m) => `<tr><td class="mono">${esc(m.c)}</td><td>${esc(m.n)}</td><td class="n">${m.q.toLocaleString("pt-BR")} ${esc(m.u)}</td><td style="white-space:normal;min-width:200px">${esc(ondeTexto(m.locais))}</td><td class="n">${m.os.size}</td></tr>`).join("")}</tbody></table></div>` : `<div class="zero">Nenhum material de carro no período.</div>`;
 }
 
 const fmtHoras = (m) => (m == null ? "—" : `${(m / 60).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} h`);
@@ -1118,46 +1188,86 @@ function folhaDesempenho(uid, eq) {
 }
 
 /* ---------------- Usuários ---------------- */
-function viewUsuarios() {
-  const u = Object.values(S.usuarios).sort((a, b) => b.ativo - a.ativo || a.nome.localeCompare(b.nome));
+async function invocarAdmin(body) {
+  const { data, error } = await sb.functions.invoke("admin-usuarios", { body });
+  if (error) { let m = error.message; try { m = (await error.context.json()).erro || m; } catch {} throw new Error(m); }
+  return data;
+}
+const situacaoU = (u) => (u.excluido_em ? "excluido" : u.ativo ? "ativo" : "bloqueado");
+function viewUsuarios(aba = S.abaUsu || "ativo") {
+  S.abaUsu = aba;
+  const todos = Object.values(S.usuarios), n = (k) => todos.filter((u) => situacaoU(u) === k).length;
+  const u = todos.filter((x) => situacaoU(x) === aba).sort((a, b) => a.nome.localeCompare(b.nome));
+  const sit = { ativo: ["Com acesso", "onoff"], bloqueado: ["Bloqueado", "onoff off"], excluido: ["Excluído", "onoff off"] };
   $("#view").innerHTML = `<div class="content">
-    <div class="dash-bar"><span class="muted">${u.filter((x) => x.ativo).length} com acesso · ${u.filter((x) => !x.ativo).length} sem acesso</span><div style="flex:1"></div>
+    <div class="dash-bar"><div class="seg" id="uAba" style="margin:0">${[["ativo", "Com acesso"], ["bloqueado", "Bloqueados"], ["excluido", "Excluídos"]]
+      .map(([k, r]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}<b>${n(k)}</b></button>`).join("")}</div><div style="flex:1"></div>
       <button class="btn btn-primary" id="novoU">${ic("plus")}Cadastrar usuário</button></div>
-    <div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Acesso</th></tr></thead>
-    <tbody>${u.map((x) => `<tr data-u="${x.id}" style="${x.ativo ? "" : "opacity:.55"}"><td><span class="who-cell">${av(x.id)}${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
-      <td>${x.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td><td><span class="onoff${x.ativo ? "" : " off"}">${x.ativo ? "Liberado" : "Retirado"}</span></td></tr>`).join("")}</tbody></table></div></div>`;
+    ${u.length ? `<div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Situação</th></tr></thead>
+    <tbody>${u.map((x) => `<tr data-u="${x.id}"><td><span class="who-cell">${av(x.id)}${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
+      <td>${x.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td><td><span class="${sit[aba][1]}">${sit[aba][0]}</span></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="zero">Nenhum usuário nesta situação.</div>`}
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Bloquear ou excluir não apaga o histórico: as OS, atendimentos, materiais e pausas continuam com o nome da pessoa.</p></div>`;
+  $("#uAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewUsuarios(b.dataset.a); };
   $("#novoU").onclick = () => folhaUsuario(null);
-  $(".users tbody").onclick = (e) => { const tr = e.target.closest("[data-u]"); if (tr) folhaUsuario(S.usuarios[tr.dataset.u]); };
+  $(".users tbody")?.addEventListener("click", (e) => { const tr = e.target.closest("[data-u]"); if (tr) folhaUsuario(S.usuarios[tr.dataset.u]); });
 }
 function folhaUsuario(u) {
-  const novo = !u;
+  const novo = !u, sit = u ? situacaoU(u) : "ativo";
+  const fim = async (fechar, msg, r) => { await carregarUsuarios(); fechar(); toast(msg + (r?.devolvidas ? ` ${r.devolvidas} OS que estavam com a pessoa voltaram para o gestor.` : "")); viewUsuarios(); };
   folha({
-    titulo: novo ? "Cadastrar usuário" : esc(u.nome), sub: novo ? "O login é usado para entrar; não precisa de e-mail." : `Login: ${esc(u.login)}`,
-    corpo: `<label class="field"><span>Nome completo</span><input class="input" id="uNome" value="${esc(u?.nome ?? "")}"></label>
+    titulo: novo ? "Cadastrar usuário" : esc(u.nome), sub: novo ? "O login é usado para entrar; não precisa de e-mail." : `Login: ${esc(u.login)} · ${{ ativo: "com acesso", bloqueado: "bloqueado", excluido: "excluído" }[sit]}`,
+    corpo: sit === "excluido" ? `<div class="note">Este usuário foi excluído em ${fmtDH(u.excluido_em)}. Ele não entra no sistema, mas o histórico dele continua preservado.
+        Se foi um engano, restaure: ele volta bloqueado e você libera quando quiser.</div><p class="err" id="erroU"></p>`
+      : `<label class="field"><span>Nome completo</span><input class="input" id="uNome" value="${esc(u?.nome ?? "")}"></label>
       ${novo ? `<label class="field"><span>Login</span><input class="input" id="uLogin" autocapitalize="none" placeholder="ex.: joao.silva"></label>
       <label class="field"><span>Senha inicial <em>(mín. 8)</em></span><input class="input" id="uSenha"></label>` : ""}
       <div class="label">Perfis</div><div class="checks">${Object.entries(PERFIS).map(([k, p]) => `<label><input type="checkbox" value="${k}" ${u?.perfis.includes(k) ? "checked" : ""}>${p.nome}<small>${p.faz}</small></label>`).join("")}</div>
-      ${novo ? "" : `<div class="label">Acesso</div><div class="checks"><label><input type="checkbox" id="uAtivo" ${u.ativo ? "checked" : ""}>Acesso liberado<small>desmarque para bloquear o login</small></label></div>
-      <div class="label">Redefinir senha</div><div style="display:flex;gap:8px"><input class="input" id="uNova" placeholder="Nova senha (mín. 8)"><button class="btn" id="uSenhaBtn">Redefinir</button></div>`}
+      ${novo ? "" : `<div class="label">Redefinir senha</div><div style="display:flex;gap:8px"><input class="input" id="uNova" placeholder="Nova senha (mín. 8)"><button class="btn" id="uSenhaBtn">Redefinir</button></div>
+      <div class="zona">
+        <div><b>${sit === "ativo" ? "Bloquear acesso" : "Desbloquear acesso"}</b><small>${sit === "ativo" ? "A pessoa sai do sistema em até 1 minuto e não consegue entrar. OS em mãos voltam para o gestor." : "A pessoa volta a entrar com o mesmo login e senha."}</small></div>
+        <button class="btn ${sit === "ativo" ? "btn-danger" : ""}" id="uBloq">${sit === "ativo" ? "Bloquear" : "Desbloquear"}</button></div>
+      <div class="zona perigo"><div><b>Excluir usuário</b><small>Some das listas e perde o acesso. O histórico é preservado (exclusão lógica).</small></div><button class="btn btn-danger" id="uExc">Excluir</button></div>`}
       <p class="err" id="erroU"></p>`,
-    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okU">${novo ? "Cadastrar" : "Salvar"}</button>`,
+    rodape: sit === "excluido" ? `<button class="btn" data-fechar>Fechar</button><button class="btn btn-primary" id="uRest">Restaurar usuário</button>`
+      : `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okU">${novo ? "Cadastrar" : "Salvar"}</button>`,
     aoAbrir: (el, fechar) => {
-      const inv = async (body) => { const { data, error } = await sb.functions.invoke("admin-usuarios", { body }); if (error) { let m = error.message; try { m = (await error.context.json()).erro || m; } catch {} throw new Error(m); } return data; };
-      const recarregaU = async () => { const { data } = await sb.from("usuarios").select("*").order("nome"); S.usuarios = Object.fromEntries(data.map((x) => [x.id, x])); };
-      $("#uSenhaBtn", el)?.addEventListener("click", (e) => { const s = $("#uNova", el).value; if (s.length < 8) return ($("#erroU", el).textContent = "A senha precisa de 8 caracteres.");
-        busy(e.currentTarget, async () => { await inv({ acao: "senha", id: u.id, senha: s }); $("#uNova", el).value = ""; toast("Senha redefinida."); }); });
-      $("#okU", el).onclick = (e) => {
+      const erro = (t) => ($("#erroU", el).textContent = t);
+      $("#uRest", el)?.addEventListener("click", (e) => busy(e.currentTarget, async () => { await invocarAdmin({ acao: "restaurar", id: u.id }); await fim(fechar, "Usuário restaurado (bloqueado)."); }));
+      $("#uSenhaBtn", el)?.addEventListener("click", (e) => { const s2 = $("#uNova", el).value; if (s2.length < 8) return erro("A senha precisa de 8 caracteres.");
+        busy(e.currentTarget, async () => { await invocarAdmin({ acao: "senha", id: u.id, senha: s2 }); $("#uNova", el).value = ""; toast("Senha redefinida."); }); });
+      $("#uBloq", el)?.addEventListener("click", (e) => {
+        const bloquear = sit === "ativo";
+        if (bloquear && u.id === S.eu.id) return erro("Você não pode bloquear o seu próprio usuário.");
+        confirmar({ titulo: bloquear ? `Bloquear ${esc(u.nome)}?` : `Desbloquear ${esc(u.nome)}?`, texto: bloquear ? "A pessoa perde o acesso imediatamente. As OS que estiverem com ela voltam para o gestor direcionar." : "A pessoa volta a acessar o sistema normalmente.",
+          botao: bloquear ? "Bloquear acesso" : "Desbloquear", perigo: bloquear,
+          ok: async () => { const r = await invocarAdmin({ acao: "atualizar", id: u.id, nome: u.nome, perfis: u.perfis, ativo: !bloquear }); await fim(fechar, bloquear ? "Acesso bloqueado." : "Acesso liberado.", r); } });
+      });
+      $("#uExc", el)?.addEventListener("click", () => {
+        if (u.id === S.eu.id) return erro("Você não pode excluir o seu próprio usuário.");
+        confirmar({ titulo: "Tem certeza que deseja excluir este usuário?", texto: `<b>${esc(u.nome)}</b> perde o acesso e sai das listas. O histórico de OS, materiais e pausas é mantido. Dá para restaurar depois em “Excluídos”.`,
+          botao: "Sim, excluir", perigo: true, digitar: "EXCLUIR",
+          ok: async () => { const r = await invocarAdmin({ acao: "excluir", id: u.id }); await fim(fechar, "Usuário excluído.", r); } });
+      });
+      $("#okU", el)?.addEventListener("click", (e) => {
         const perfis = $$(".checks input[value]:checked", el).map((c) => c.value), nome = $("#uNome", el).value.trim();
-        if (!nome) return ($("#erroU", el).textContent = "Informe o nome.");
-        if (!perfis.length) return ($("#erroU", el).textContent = "Marque pelo menos um perfil.");
+        if (!nome) return erro("Informe o nome.");
+        if (!perfis.length) return erro("Marque pelo menos um perfil.");
         busy(e.currentTarget, async () => {
-          if (novo) await inv({ acao: "criar", nome, login: $("#uLogin", el).value, senha: $("#uSenha", el).value, perfis });
-          else await inv({ acao: "atualizar", id: u.id, nome, perfis, ativo: $("#uAtivo", el).checked });
-          await recarregaU(); fechar(); toast(novo ? "Usuário cadastrado." : "Alterações salvas."); viewUsuarios();
+          if (novo) await invocarAdmin({ acao: "criar", nome, login: $("#uLogin", el).value, senha: $("#uSenha", el).value, perfis });
+          else await invocarAdmin({ acao: "atualizar", id: u.id, nome, perfis, ativo: u.ativo });
+          await fim(fechar, novo ? "Usuário cadastrado." : "Alterações salvas.");
         });
-      };
+      });
     },
   });
+}
+// confirmação com botão de perigo (e, se pedido, digitar uma palavra)
+function confirmar({ titulo, texto, botao, perigo, digitar, ok }) {
+  folha({ titulo, corpo: `<p style="margin-bottom:12px">${texto}</p>${digitar ? `<label class="field"><span>Para confirmar, digite <b>${digitar}</b></span><input class="input" id="cfTxt" autocapitalize="characters"></label>` : ""}<p class="err" id="cfErr"></p>`,
+    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn ${perigo ? "btn-danger-cheio" : "btn-primary"}" id="cfOk">${botao}</button>`,
+    aoAbrir: (el, fechar) => { $("#cfOk", el).onclick = (e) => { if (digitar && $("#cfTxt", el).value.trim().toUpperCase() !== digitar) return ($("#cfErr", el).textContent = `Digite ${digitar} para confirmar.`);
+      busy(e.currentTarget, async () => { await ok(); fechar(); }); }; } });
 }
 
 /* ---------------- início ---------------- */
@@ -1225,7 +1335,7 @@ async function gerarRelatorio() {
   const pausaAt = (id) => rP.data.filter((p) => p.atendimento_id === id && p.fim).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
   const liq = (a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id);
   const finT = T.filter((a) => dentro(a.finalizada_em)), iniT = T.filter((a) => dentro(a.iniciada_em));
-  const devol = T.filter((a) => dentro(a.avaliado_em) && ["RECUSADO", "NAO_RESOLVIDO"].includes(a.resultado));
+  const devol = T.filter((a) => dentro(a.avaliado_em) && ["RECUSADO", "NAO_RESOLVIDO", "DEVOLVIDO"].includes(a.resultado));
   const idsT = new Set(T.map((a) => a.id)), pz = rP.data.filter((p) => idsT.has(p.atendimento_id) && dentro(p.inicio));
   const parado = pz.reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), pend = L.filter((r) => r.status !== "CONCLUÍDA");
@@ -1233,7 +1343,7 @@ async function gerarRelatorio() {
   const R = {
     rotPer, ini0, fim0, filtros: [["Período", `${rotPer} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Granja", nuc ? nomeN(nuc) : "Todas"], ["Classificação", prio ? PRIO[prio].rot : "Todas"]],
     k: { abertas: L.length, concl: concl.length, pct: pct(concl.length, L.length), pend: pend.length, semInicio: semInicio.length, andamento: pend.length - semInicio.length,
-      devol: devol.length, recusas: devol.filter((a) => a.resultado === "RECUSADO").length, naoRes: devol.filter((a) => a.resultado === "NAO_RESOLVIDO").length,
+      devol: devol.length, recusas: devol.filter((a) => a.resultado === "RECUSADO").length, naoRes: devol.filter((a) => a.resultado === "NAO_RESOLVIDO").length, admin: devol.filter((a) => a.resultado === "DEVOLVIDO").length,
       horas: finT.reduce((s2, a) => s2 + liq(a), 0), atendidas: finT.length, medio: media(finT.map(liq)), resposta: media(iniT.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
       lead: media(concl.map((r) => r.min_lead_total)), parado },
   };
@@ -1250,7 +1360,7 @@ async function gerarRelatorio() {
     return [osId(r.id), fmtDH(r.aberta_em), `${nomeN(r.nucleo_id)} · ${localCurto(r.galpoes)}`, o.equipamento || "—", o.descricao || "", r.prioridade ? PRIO[r.prioridade].rot : "A classificar",
       o.pausada_em ? "Pausada" : STATUS[r.status].rot, r.manutentor_id ? nomeU(r.manutentor_id) : "—", idade(r.aberta_em)]; });
   R.pendKeys = pend.map((r) => ({ id: r.id, prio: r.prioridade, status: r.status, pausa: osInfo[r.id]?.pausada_em }));
-  R.devolucoes = devol.sort((a, b) => new Date(b.avaliado_em) - new Date(a.avaliado_em)).map((a) => [osId(a.os_id), fmtDH(a.avaliado_em), a.resultado === "RECUSADO" ? "Recusada pelo manutentor" : "Técnico: não resolvido",
+  R.devolucoes = devol.sort((a, b) => new Date(b.avaliado_em) - new Date(a.avaliado_em)).map((a) => [osId(a.os_id), fmtDH(a.avaliado_em), a.resultado === "RECUSADO" ? "Recusada pelo manutentor" : a.resultado === "DEVOLVIDO" ? "Devolvida pelo administrador" : "Técnico: não resolvido",
     nomeU(a.manutentor_id), a.ordens_servico?.descricao || "", a.motivo_recusa || "—"]);
   S.rel = R;
   desenharRelatorio(R);
@@ -1279,7 +1389,7 @@ function desenharRelatorio(R) {
         ${met("Abertas no período", k.abertas, "total de OS abertas")}
         ${met("Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas} concluídas`)}
         ${met("Não atendidas", k.pend, `${k.semInicio} sem início · ${k.andamento} em andamento`, k.semInicio > 0)}
-        ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas`, k.devol > 0)}</div></section>
+        ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas${k.admin ? ` · ${k.admin} pelo admin` : ""}`, k.devol > 0)}</div></section>
       <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
         ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
         ${met("Tempo médio de atendimento", fmtMin(k.medio), "execução líquida por OS")}
@@ -1310,6 +1420,19 @@ function desenharRelatorio(R) {
   </div>`;
 }
 
+// Salvar arquivo: no iPhone/iPad (principalmente com o app instalado) abre o "Compartilhar" → Salvar em Arquivos;
+// no Android e no computador, baixa direto.
+async function salvarArquivo(blob, nome) {
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  try {
+    const f = new File([blob], nome, { type: blob.type });
+    if (ios && navigator.canShare?.({ files: [f] })) { await navigator.share({ files: [f], title: nome }); return; }
+  } catch (e) { if (e?.name === "AbortError") return; }
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast("Arquivo gerado: " + nome);
+}
 async function logoDataURL() {
   if (C.LOGO.startsWith("data:")) return C.LOGO;
   const b = await (await fetch(C.LOGO)).blob();
@@ -1368,8 +1491,7 @@ async function exportarPDF() {
   const n = doc.getNumberOfPages();
   for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setDrawColor(230, 230, 226); doc.line(M, 288, W - M, 288); doc.setFontSize(7.5); doc.setTextColor(...CINZA);
     doc.text(`${C.NOME_EMPRESA} · ${C.NOME_SISTEMA}`, M, 292); doc.text(`Página ${i} de ${n}`, W - M, 292, { align: "right" }); }
-  doc.save(nomeArq("pdf"));
-  toast("PDF gerado.");
+  await salvarArquivo(doc.output("blob"), nomeArq("pdf"));
 }
 
 async function exportarExcel() {
@@ -1393,6 +1515,198 @@ async function exportarExcel() {
   aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
   aba("Devoluções", [["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], ...R.devolucoes], [10, 16, 24, 22, 40, 40]);
   ["Por granja", "Por classificação"].forEach((n) => { const ws = wb.Sheets[n]; for (let r = 2; r <= 40; r++) if (ws["D" + r]) ws["D" + r].z = "0%"; });
-  X.writeFile(wb, nomeArq("xlsx"));
-  toast("Excel gerado.");
+  await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArq("xlsx"));
+}
+/* ---------------- Controles (ADMIN): materiais por carro e jornada ---------------- */
+const dhCompleta = (ts) => (ts ? new Date(ts).toLocaleString("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }).replace(",", "") : "");
+const localMat = (g) => ((g || []).length ? local(g) : "Núcleo todo");
+const PERIODOS = `<option value="hoje">Hoje</option><option value="semana">Esta semana</option><option value="semana_ant">Semana passada</option>
+  <option value="mes" selected>Este mês</option><option value="mes_ant">Mês passado</option><option value="30">Últimos 30 dias</option><option value="x">Escolher datas…</option>`;
+function filtroPeriodoHTML(p) {
+  return `<label class="field"><span>Período</span><select class="input" id="${p}Per">${PERIODOS}</select></label>
+    <label class="field" id="${p}DeL" hidden><span>De</span><input type="date" class="input" id="${p}De" value="${hojeISO(-30)}"></label>
+    <label class="field" id="${p}AteL" hidden><span>Até</span><input type="date" class="input" id="${p}Ate" value="${hojeISO()}"></label>`;
+}
+const lerPeriodo = (p) => faixaPeriodo($(`#${p}Per`).value, $(`#${p}De`).value, $(`#${p}Ate`).value);
+
+function viewControles(aba = S.abaCtl || "mat") {
+  S.abaCtl = aba;
+  const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
+  const optM = `<option value="">Todos</option>${mnts.map((u) => `<option value="${u.id}">${esc(u.nome)}${u.excluido_em ? " (excluído)" : !u.ativo ? " (bloqueado)" : ""}</option>`).join("")}`;
+  $("#view").innerHTML = `<div class="content">
+    <div class="seg" id="cAba">${[["mat", "Materiais dos carros", "box"], ["jor", "Jornada e pausas", "clock"]].map(([k, r, i]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}</button>`).join("")}</div>
+    ${aba === "mat" ? `
+    <section class="card rel-filtros"><div class="rf-grid">
+      ${filtroPeriodoHTML("m")}
+      <label class="field"><span>Carro (almoxarifado)</span><select class="input" id="mCar"><option value="">Todos</option>${(S.carros || []).map((c) => `<option value="${c.codigo}">${c.codigo}</option>`).join("")}<option value="sem">Sem código (lançamentos antigos)</option></select></label>
+      <label class="field"><span>Manutentor</span><select class="input" id="mMnt">${optM}</select></label>
+      <label class="field"><span>Núcleo</span><select class="input" id="mNuc"><option value="">Todos</option>${S.nucleos.map((n) => `<option value="${n.id}">${esc(n.nome)}</option>`).join("")}</select></label>
+      <label class="field"><span>Aviário</span><input class="input" id="mAv" inputmode="numeric" placeholder="Ex.: 72"></label>
+      <label class="field"><span>OS</span><input class="input" id="mOs" inputmode="numeric" placeholder="Ex.: 51"></label>
+      <label class="field"><span>Material</span><input class="input" id="mTxt" placeholder="Código ou nome"></label>
+    </div><div class="rel-acoes"><div class="seg" id="mVis" style="margin:0"><button data-v="cons" aria-pressed="true">Consolidado</button><button data-v="det" aria-pressed="false">Detalhado</button></div>
+      <div class="grow"></div><button class="btn" id="mCsv">${ic("download")}CSV</button><button class="btn btn-primary" id="mXls">${ic("sheet")}Excel</button></div></section>
+    <div id="mOut"><div class="skel"></div></div>` : `
+    <section class="card rel-filtros"><div class="rf-grid">
+      ${filtroPeriodoHTML("j")}
+      <label class="field"><span>Manutentor</span><select class="input" id="jMnt">${optM}</select></label>
+      <label class="field"><span>Mostrar</span><select class="input" id="jQual"><option value="alerta">Só fora do padrão</option><option value="todas">Todas as pausas</option></select></label>
+    </div><div class="rel-acoes"><span class="muted" id="jCfgTxt"></span><div class="grow"></div><button class="btn" id="jCfg">${ic("cog")}Horário padrão</button><button class="btn btn-primary" id="jXls">${ic("sheet")}Excel</button></div></section>
+    <div id="jOut"><div class="skel"></div></div>`}
+  </div>`;
+  $("#cAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewControles(b.dataset.a); };
+  const ligar = (p, fn) => { $(`#${p}Per`).onchange = () => { const x = $(`#${p}Per`).value === "x"; $(`#${p}DeL`).hidden = $(`#${p}AteL`).hidden = !x; fn(); }; };
+  if (aba === "mat") {
+    ligar("m", materiaisBuscar);
+    ["mDe", "mAte", "mCar", "mMnt", "mNuc"].forEach((i) => ($("#" + i).onchange = materiaisBuscar));
+    ["mAv", "mOs", "mTxt"].forEach((i) => ($("#" + i).oninput = () => { clearTimeout(viewControles.t); viewControles.t = setTimeout(materiaisBuscar, 400); }));
+    $("#mVis").onclick = (e) => { const b = e.target.closest("[data-v]"); if (!b) return; $$("#mVis button").forEach((x) => x.setAttribute("aria-pressed", x === b)); materiaisDesenhar(); };
+    $("#mXls").onclick = (e) => busy(e.currentTarget, materiaisExcel);
+    $("#mCsv").onclick = (e) => busy(e.currentTarget, materiaisCSV);
+    materiaisBuscar();
+  } else {
+    ligar("j", jornadaBuscar);
+    ["jDe", "jAte", "jMnt", "jQual"].forEach((i) => ($("#" + i).onchange = i === "jQual" ? jornadaDesenhar : jornadaBuscar));
+    $("#jCfg").onclick = folhaJornadaConfig;
+    $("#jXls").onclick = (e) => busy(e.currentTarget, jornadaExcel);
+    jornadaBuscar();
+  }
+}
+
+/* ---- materiais ---- */
+async function materiaisBuscar() {
+  const tok = S.tok, [ini0, fim0, rot] = lerPeriodo("m");
+  let q = sb.from("os_materiais").select("*").gte("registrado_em", ini0.toISOString()).lt("registrado_em", fim0.toISOString());
+  const car = $("#mCar").value, mnt = $("#mMnt").value, nuc = $("#mNuc").value, av2 = parseInt($("#mAv").value), os = parseInt(String($("#mOs").value).replace(/\D/g, "")), t = $("#mTxt").value.trim().replace(/[%*,()]/g, " ").trim();
+  if (car === "sem") q = q.is("almoxarifado", null); else if (car) q = q.eq("almoxarifado", +car);
+  if (mnt) q = q.eq("manutentor_id", mnt);
+  if (nuc) q = q.eq("nucleo_id", +nuc);
+  if (av2) q = q.contains("galpoes", [av2]);
+  if (os) q = q.eq("os_id", os);
+  if (t) q = q.or(`codigo.ilike.*${t}*,material.ilike.*${t}*`);
+  const { data, error } = await q.order("registrado_em", { ascending: false }).range(0, 19999);
+  if (tok !== S.tok) return;
+  if (error) return toast(errMsg(error), true);
+  S.ctlMat = { linhas: data, rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Carro", car === "sem" ? "Sem código" : car || "Todos"],
+    ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Núcleo", nuc ? nomeN(+nuc) : "Todos"], ["Aviário", av2 || "Todos"], ["OS", os ? osId(os) : "Todas"], ["Material", t || "Todos"]] };
+  materiaisDesenhar();
+}
+// "Aeroporto: Av. 12, 13 · Vinagre 01: núcleo todo"
+const ondeTexto = (locais) => Object.entries(locais).sort((a, b) => nomeN(+a[0]).localeCompare(nomeN(+b[0])))
+  .map(([n, l]) => `${nomeN(+n)}: ${[l.av.size ? `Av. ${[...l.av].sort((a, b) => a - b).join(", ")}` : "", l.todo ? "núcleo todo" : ""].filter(Boolean).join(" + ")}`).join(" · ");
+function consolidarMat(linhas) {
+  const g = {};
+  linhas.forEach((m) => { const k = `${m.almoxarifado ?? "—"}|${String(m.codigo).toUpperCase()}|${m.unidade}`;
+    (g[k] ??= { car: m.almoxarifado, codigo: m.codigo, material: m.material, unidade: m.unidade, qtd: 0, os: new Set(), n: 0, locais: {} }); g[k].qtd += Number(m.quantidade); g[k].os.add(m.os_id); g[k].n++;
+    const lc = (g[k].locais[m.nucleo_id] ??= { todo: false, av: new Set() }); if (!(m.galpoes || []).length) lc.todo = true; (m.galpoes || []).forEach((x) => lc.av.add(x)); });
+  Object.values(g).forEach((x) => (x.onde = ondeTexto(x.locais)));
+  return Object.values(g).sort((a, b) => String(a.car).localeCompare(String(b.car)) || String(a.codigo).localeCompare(String(b.codigo)));
+}
+function materiaisDesenhar() {
+  const D = S.ctlMat; if (!D) return;
+  const det = $("#mVis [aria-pressed=true]").dataset.v === "det", L = D.linhas, porCarro = {};
+  L.forEach((m) => (porCarro[m.almoxarifado ?? "—"] = (porCarro[m.almoxarifado ?? "—"] || 0) + 1));
+  const qtdF = (v) => Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 3 });
+  const resumo = `<div class="ctl-res">${[...(S.carros || []).map((c) => c.codigo), "—"].filter((c) => porCarro[c]).map((c) => `<div><small>${c === "—" ? "Sem código" : "Carro " + c}</small><b>${porCarro[c]}</b><span>lançamento(s)</span></div>`).join("")
+    || `<div><small>Período</small><b>0</b><span>lançamentos</span></div>`}</div>`;
+  const tabela = det
+    ? `<div class="tscroll"><table class="rt"><thead><tr><th>Data</th><th>Carro</th><th>Código</th><th class="wide">Material</th><th>Controle</th><th class="n">Qtd</th><th>Un.</th><th>OS</th><th>Granja</th><th>Onde foi usado</th><th>Manutentor</th></tr></thead><tbody>
+      ${L.map((m) => `<tr><td>${fmtDH(m.registrado_em)}</td><td><b>${m.almoxarifado ?? "—"}</b></td><td class="mono">${esc(m.codigo)}</td><td class="wide">${esc(m.material)}</td><td>${esc(m.controle || "—")}</td>
+        <td class="n">${qtdF(m.quantidade)}</td><td>${esc(m.unidade)}</td><td><button class="linkish mono" data-os="${m.os_id}">${osId(m.os_id)}</button></td><td>${esc(nomeN(m.nucleo_id))}</td><td>${localMat(m.galpoes)}</td><td>${esc(nomeU(m.manutentor_id))}</td></tr>`).join("")}</tbody></table></div>`
+    : `<div class="tscroll"><table class="rt"><thead><tr><th>Carro</th><th>Código</th><th class="wide">Material</th><th class="n">Quantidade</th><th>Un.</th><th class="wide">Onde foi usado (granja / aviário)</th><th class="n">OS</th></tr></thead><tbody>
+      ${consolidarMat(L).map((x) => `<tr><td><b>${x.car ?? "—"}</b></td><td class="mono">${esc(x.codigo)}</td><td class="wide">${esc(x.material)}</td><td class="n"><b>${qtdF(x.qtd)}</b></td><td>${esc(x.unidade)}</td><td class="wide">${esc(x.onde)}</td><td class="n">${x.os.size}</td></tr>`).join("")}</tbody></table></div>`;
+  $("#mOut").innerHTML = `<div class="rel-doc"><div class="rel-bloco"><div class="rel-bh"><h3>${det ? "Lançamentos" : "Consolidado por carro e material"}</h3><span>${L.length} lançamento(s) · ${D.filtros[0][1]}</span></div>
+    ${resumo}${L.length ? tabela : `<div class="rel-vazio">Nenhum material encontrado com esses filtros.</div>`}</div>
+    <p class="rel-nota">Só entram materiais que o manutentor informou como retirados do carro. “Núcleo todo” = OS aberta para a granja inteira. Lançamentos antigos (antes desta versão) aparecem sem código de carro.</p></div>`;
+  $("#mOut").onclick = (e) => { const b = e.target.closest("[data-os]"); if (b) abrirOS(+b.dataset.os); };
+}
+const linhaMatExp = (m) => [dhCompleta(m.registrado_em), m.almoxarifado ?? "", m.codigo, m.material, m.controle || "", Number(m.quantidade), m.unidade, osId(m.os_id), nomeN(m.nucleo_id), localMat(m.galpoes), (m.galpoes || []).length ? "Aviário" : "Núcleo todo", nomeU(m.manutentor_id)];
+const CAB_MAT = ["Data", "Carro (almoxarifado)", "Código", "Material", "Controle", "Quantidade", "Unidade", "OS", "Granja", "Onde foi usado", "Destino", "Manutentor"];
+async function materiaisExcel() {
+  const D = S.ctlMat; if (!D) return;
+  await carregarScript("xlsx.mini.min.js", () => window.XLSX);
+  const X = window.XLSX, wb = X.utils.book_new(), aba = (n, l, w) => { const ws = X.utils.aoa_to_sheet(l); ws["!cols"] = w.map((c) => ({ wch: c })); X.utils.book_append_sheet(wb, ws, n); };
+  aba("Consolidado", [["Materiais dos carros — consolidado"], ...D.filtros, [], ["Carro (almoxarifado)", "Código", "Material", "Quantidade", "Unidade", "Onde foi usado (granja / aviário)", "Nº de OS", "Lançamentos"],
+    ...consolidarMat(D.linhas).map((x) => [x.car ?? "", x.codigo, x.material, Math.round(x.qtd * 1000) / 1000, x.unidade, x.onde, x.os.size, x.n])], [20, 12, 36, 12, 9, 44, 9, 12]);
+  aba("Detalhado", [CAB_MAT, ...D.linhas.map(linhaMatExp)], [16, 18, 12, 36, 14, 11, 9, 10, 14, 20, 13, 24]);
+  await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArqCtl("materiais-carros", D, "xlsx"));
+}
+async function materiaisCSV() {
+  const D = S.ctlMat; if (!D) return;
+  const cel = (v) => { const t = String(v ?? ""); return /[;"\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const linhas = [CAB_MAT, ...D.linhas.map((m) => { const l = linhaMatExp(m); l[5] = String(l[5]).replace(".", ","); return l; })].map((l) => l.map(cel).join(";")).join("\r\n");
+  await salvarArquivo(new Blob(["\ufeff" + linhas], { type: "text/csv;charset=utf-8" }), nomeArqCtl("materiais-carros", D, "csv"));
+}
+const nomeArqCtl = (base, D, ext) => `${base}_${D.ini0.toLocaleDateString("sv-SE", { timeZone: TZ })}_${new Date(D.fim0 - 1).toLocaleDateString("sv-SE", { timeZone: TZ })}.${ext}`;
+
+/* ---- jornada ---- */
+const hhmm = (t) => String(t || "17:00").slice(0, 5);
+async function jornadaBuscar() {
+  const tok = S.tok, [ini0, fim0, rot] = lerPeriodo("j"), mnt = $("#jMnt").value;
+  let q = sb.from("vw_pausas").select("*").gte("inicio", ini0.toISOString()).lt("inicio", fim0.toISOString());
+  if (mnt) q = q.eq("manutentor_id", mnt);
+  const { data, error } = await q.order("inicio", { ascending: false }).range(0, 19999);
+  if (tok !== S.tok) return;
+  if (error) return toast(errMsg(error), true);
+  S.ctlJor = { linhas: data, rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"]] };
+  jornadaDesenhar();
+}
+function resumoDias(L) {
+  const lim = S.jornada?.almoco_max_min || 120, d = {};
+  L.forEach((p) => { const k = `${p.dia}|${p.manutentor_id}`; const x = (d[k] ??= { dia: p.dia, mnt: p.manutentor_id, almoco: 0, pausas: 0, total: 0, apos: 0, pend: 0 });
+    x.pausas++; x.total += p.duracao_min; if (p.motivo === "ALMOCO") x.almoco += p.duracao_min; if (p.apos_expediente) x.apos++; });
+  return Object.values(d).map((x) => ({ ...x, excesso: Math.max(0, x.almoco - lim) })).sort((a, b) => b.dia.localeCompare(a.dia) || nomeU(a.mnt).localeCompare(nomeU(b.mnt)));
+}
+function jornadaDesenhar() {
+  const D = S.ctlJor; if (!D) return;
+  const cfg = S.jornada || { fim_expediente: "17:00", almoco_max_min: 120 };
+  $("#jCfgTxt").innerHTML = `Padrão: expediente até <b>${hhmm(cfg.fim_expediente)}</b> · almoço de <b>${fmtMin(cfg.almoco_max_min)}</b>`;
+  const so = $("#jQual").value === "alerta", L = D.linhas, fora = (p) => p.excesso_almoco_min > 0 || p.apos_expediente;
+  const lista = so ? L.filter(fora) : L, dias = resumoDias(L), diaBR = (d) => d.split("-").reverse().join("/");
+  const pend = L.filter((p) => fora(p) && !p.autorizada_em).length;
+  $("#jOut").innerHTML = `<div class="rel-doc">
+    <div class="rel-bloco"><div class="ctl-res">
+      <div><small>Pausas no período</small><b>${L.length}</b><span>${fmtMin(L.reduce((a, p) => a + p.duracao_min, 0))} no total</span></div>
+      <div><small>Almoços acima do padrão</small><b class="${dias.some((x) => x.excesso) ? "hot" : ""}">${dias.filter((x) => x.excesso).length}</b><span>dias com excesso</span></div>
+      <div><small>Pausas após ${hhmm(cfg.fim_expediente)}</small><b>${L.filter((p) => p.apos_expediente).length}</b><span>começaram depois do expediente</span></div>
+      <div><small>Sem autorização</small><b class="${pend ? "hot" : ""}">${pend}</b><span>fora do padrão, aguardando análise</span></div></div></div>
+    <div class="rel-bloco"><div class="rel-bh"><h3>Resumo por dia</h3><span>almoço somado no dia · padrão ${fmtMin(cfg.almoco_max_min)}</span></div>
+      ${dias.length ? `<div class="tscroll"><table class="rt"><thead><tr><th>Dia</th><th>Manutentor</th><th class="n">Almoço</th><th class="n">Excesso</th><th class="n">Pausas</th><th class="n">Tempo pausado</th><th class="n">Após ${hhmm(cfg.fim_expediente)}</th></tr></thead><tbody>
+      ${dias.map((x) => `<tr><td>${diaBR(x.dia)}</td><td><b>${esc(nomeU(x.mnt))}</b></td><td class="n">${x.almoco ? fmtMin(x.almoco) : "—"}</td><td class="n">${x.excesso ? `<span class="tag bad">+${fmtMin(x.excesso)}</span>` : "—"}</td>
+        <td class="n">${x.pausas}</td><td class="n">${fmtMin(x.total)}</td><td class="n">${x.apos ? `<span class="tag">${x.apos}</span>` : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="rel-vazio">Nenhuma pausa no período.</div>`}</div>
+    <div class="rel-bloco"><div class="rel-bh"><h3>${so ? "Pausas fora do padrão" : "Todas as pausas"}</h3><span>${lista.length} pausa(s) · horários registrados automaticamente</span></div>
+      ${lista.length ? `<div class="tscroll"><table class="rt"><thead><tr><th>Manutentor</th><th>OS</th><th>Motivo</th><th>Início</th><th>Retorno</th><th class="n">Duração</th><th>Situação</th><th></th></tr></thead><tbody>
+      ${lista.map((p) => `<tr><td><b>${esc(nomeU(p.manutentor_id))}</b></td><td><button class="linkish mono" data-os="${p.os_id}">${osId(p.os_id)}</button></td><td>${MOTIVOS[p.motivo].rot}${p.detalhe ? `<small class="muted" style="display:block">${esc(p.detalhe)}</small>` : ""}</td>
+        <td>${fmtDH(p.inicio)}</td><td>${p.fim ? fmtDH(p.fim) : `<span class="tag">em pausa</span>`}</td><td class="n">${fmtMin(p.duracao_min)}</td>
+        <td>${[p.excesso_almoco_min ? `<span class="tag bad">almoço +${fmtMin(p.excesso_almoco_min)}</span>` : "", p.apos_expediente ? `<span class="tag">após ${hhmm(cfg.fim_expediente)}</span>` : ""].join(" ") || `<span class="tag ok">no padrão</span>`}
+          ${p.autorizada_em ? `<small class="muted" style="display:block">Autorizada por ${esc(nomeU(p.autorizada_por))}: ${esc(p.obs_autorizacao)}</small>` : ""}</td>
+        <td>${fora(p) && !p.autorizada_em ? `<button class="btn btn-sm" data-aut="${p.id}">Autorizar</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : `<div class="rel-vazio">${so ? "Nenhuma pausa fora do padrão no período." : "Nenhuma pausa no período."}</div>`}</div>
+    <p class="rel-nota">O manutentor não digita horários: início e retorno são gravados no momento em que ele toca em Pausar e Retomar. Pausas fora do padrão ficam registradas e podem ser autorizadas pelo administrador ou gerente, com o motivo.</p></div>`;
+  $("#jOut").onclick = (e) => {
+    const o = e.target.closest("[data-os]"); if (o) return abrirOS(+o.dataset.os);
+    const a = e.target.closest("[data-aut]"); if (!a) return;
+    folhaTexto(null, { titulo: "Autorizar pausa", sub: "Fica registrado quem autorizou e por quê.", campo: "Motivo da autorização", ph: "Ex.: atendimento emergencial no fim do dia", min: 3, botao: "Autorizar",
+      ok: async (t) => { await rpc("autorizar_pausa", { p_pausa: +a.dataset.aut, p_obs: t }); toast("Pausa autorizada."); jornadaBuscar(); } });
+  };
+}
+function folhaJornadaConfig() {
+  const cfg = S.jornada || { fim_expediente: "17:00", almoco_max_min: 120 };
+  folha({ titulo: "Horário padrão da equipe", sub: "Vale para os alertas e relatórios a partir de agora",
+    corpo: `<label class="field"><span>Fim do expediente</span><input class="input" type="time" id="cfFim" value="${hhmm(cfg.fim_expediente)}"></label>
+      <label class="field"><span>Almoço padrão</span><select class="input" id="cfAlm">${[60, 90, 120, 150, 180].map((m) => `<option value="${m}" ${m === cfg.almoco_max_min ? "selected" : ""}>${fmtMin(m)}</option>`).join("")}</select></label><p class="err" id="cfE"></p>`,
+    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="cfOk">Salvar</button>`,
+    aoAbrir: (el, fechar) => { $("#cfOk", el).onclick = (e) => busy(e.currentTarget, async () => {
+      await rpc("salvar_jornada", { p_fim: $("#cfFim", el).value, p_almoco: +$("#cfAlm", el).value });
+      const { data } = await sb.from("jornada_config").select("*").maybeSingle(); S.jornada = data; MOTIVOS.ALMOCO.lim = data.almoco_max_min; fechar(); toast("Horário padrão salvo."); jornadaBuscar(); }); } });
+}
+async function jornadaExcel() {
+  const D = S.ctlJor; if (!D) return;
+  await carregarScript("xlsx.mini.min.js", () => window.XLSX);
+  const X = window.XLSX, wb = X.utils.book_new(), aba = (n, l, w) => { const ws = X.utils.aoa_to_sheet(l); ws["!cols"] = w.map((c) => ({ wch: c })); X.utils.book_append_sheet(wb, ws, n); };
+  aba("Resumo por dia", [["Dia", "Manutentor", "Almoço (min)", "Excesso de almoço (min)", "Pausas", "Tempo pausado (min)", "Pausas após o expediente"],
+    ...resumoDias(D.linhas).map((x) => [x.dia.split("-").reverse().join("/"), nomeU(x.mnt), x.almoco, x.excesso, x.pausas, x.total, x.apos])], [12, 26, 13, 22, 9, 19, 23]);
+  aba("Pausas", [["Manutentor", "OS", "Motivo", "Detalhe", "Início", "Retorno", "Duração (min)", "Excesso almoço (min)", "Após o expediente", "Autorizada por", "Motivo da autorização"],
+    ...D.linhas.map((p) => [nomeU(p.manutentor_id), osId(p.os_id), MOTIVOS[p.motivo].rot, p.detalhe || "", dhCompleta(p.inicio), p.fim ? dhCompleta(p.fim) : "em pausa", p.duracao_min, p.excesso_almoco_min, p.apos_expediente ? "Sim" : "Não",
+      p.autorizada_por ? nomeU(p.autorizada_por) : "", p.obs_autorizacao || ""])], [24, 10, 24, 28, 16, 16, 13, 19, 16, 22, 30]);
+  await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArqCtl("jornada-pausas", D, "xlsx"));
 }
