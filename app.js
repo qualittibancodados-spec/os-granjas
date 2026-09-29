@@ -5,7 +5,14 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const sb = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY);
+const VERSAO = "7.0";
+// Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
+function fetchComPrazo(url, opts = {}) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
+  opts.signal?.addEventListener("abort", () => c.abort());
+  return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
+}
+const sb = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY, { global: { fetch: fetchComPrazo } });
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -138,7 +145,8 @@ function toast(msg, bad = false) {
   const t = $("#toast"); t.innerHTML = `${ic(bad ? "alert" : "checkc")}<span>${esc(msg)}</span>`; t.className = "on" + (bad ? " bad" : "");
   clearTimeout(toast.t); toast.t = setTimeout(() => (t.className = ""), bad ? 5000 : 2600);
 }
-const errMsg = (e) => { const m = e?.message || String(e); return /fetch|network/i.test(m) ? "Sem conexão. Verifique a internet e tente de novo." : m; };
+const erroRede = (e) => /fetch|network|abort|timeout|Load failed/i.test(e?.message || e?.name || String(e));
+const errMsg = (e) => { const m = e?.message || String(e); return erroRede(e) ? (navigator.onLine ? "O servidor demorou para responder. Verifique o sinal e tente de novo." : "Sem conexão. Verifique a internet e tente de novo.") : m; };
 async function rpc(n, a) { const { data, error } = await sb.rpc(n, a); if (error) throw error; return data; }
 async function busy(btn, fn) { btn.disabled = true; try { await fn(); } catch (e) { toast(errMsg(e), true); } finally { btn.disabled = false; } }
 
@@ -156,6 +164,7 @@ function telaLogin(msg = "") {
     </div>
     <div class="login-lado">
       <form class="caixa-login" id="fLogin">
+        ${S.status?.em_manutencao ? `<div class="note" style="margin-bottom:14px"><b>Sistema em manutenção.</b> ${esc(S.status.mensagem || "Voltamos em breve.")} Só administradores conseguem entrar agora.</div>` : ""}
         <h2>Entrar</h2>
         <p class="sub-login">Use o usuário e a senha fornecidos pelo administrador.</p>
         <label class="lg">Usuário<span class="campo-ic">${ic("user", "")}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="ex.: joao.silva"></span></label>
@@ -196,14 +205,24 @@ async function carregarUsuarios() {
   }
   S.usuarios = Object.fromEntries(data.map((u) => [u.id, { ...u, foto: u.foto_em ? cache[u.id]?.foto || null : null }]));
 }
+async function statusSistema() {
+  try { const { data, error } = await sb.from("app_status").select("em_manutencao,mensagem,atualizado_em").maybeSingle(); return error ? { erro: error } : data || {}; }
+  catch (e) { return { erro: e }; }
+}
 async function iniciar() {
+  const st = await statusSistema();
+  if (st.erro && erroRede(st.erro)) return telaForaDoAr();
+  S.status = st;
   const { data: { session } } = await sb.auth.getSession();
   if (!session) return telaLogin();
-  const { data: eu } = await sb.from("usuarios").select(COLS_USU).eq("id", session.user.id).maybeSingle();
+  const { data: eu, error: eEu } = await sb.from("usuarios").select(COLS_USU).eq("id", session.user.id).maybeSingle();
+  if (eEu && erroRede(eEu)) return telaForaDoAr();
   if (!eu?.ativo || eu.excluido_em || !eu.perfis.length) { await sb.auth.signOut(); return telaLogin("Seu usuário não tem acesso liberado. Procure o administrador."); }
   S.eu = eu;
+  if (st.em_manutencao && !eu.perfis.includes("admin")) return telaManutencao(st);
   const [n, g, c, j] = await Promise.all([sb.from("nucleos").select("*").order("nome"), sb.from("galpoes").select("*").order("numero"),
     sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios()]);
+  if (n.error || g.error) return telaForaDoAr();
   S.nucleos = n.data.map((x) => ({ ...x, galpoes: g.data.filter((y) => y.nucleo_id === x.id).map((y) => y.numero) }));
   S.nucleoPorId = Object.fromEntries(S.nucleos.map((x) => [x.id, x]));
   S.carros = (c.data || []).filter((x) => x.ativo);
@@ -213,14 +232,50 @@ async function iniciar() {
   const r = rotas();
   ir(r.find((x) => x.id === S.rota) ? S.rota : r[0].id);
 }
+// Telas de "fora do ar": manutenção programada (ligada pelo admin) e servidor sem resposta. Ambas se atualizam sozinhas.
+function telaAviso({ icone, titulo, texto, detalhe = "", seg = 30, acao }) {
+  clearInterval(telaAviso.t); S.eu = S.eu && acao === "manut" ? S.eu : null;
+  $$(".sheet-wrap, .page").forEach((x) => x.remove());
+  $("#app").innerHTML = `<section class="fora"><div class="fora-box">
+    <img src="${C.LOGO}" alt="${esc(C.NOME_EMPRESA)}">
+    <div class="fora-ic">${ic(icone)}</div><h1>${titulo}</h1><p>${texto}</p>${detalhe ? `<div class="fora-msg">${detalhe}</div>` : ""}
+    <p class="fora-cont" id="foraCont"></p>
+    <button class="btn btn-primary" id="foraTentar">${ic("refresh")}Tentar agora</button>
+    ${acao === "manut" ? `<button class="btn btn-ghost" id="foraSair">Entrar com outro usuário</button>` : ""}</div></section>`;
+  let falta = seg;
+  const tick = () => { $("#foraCont").textContent = `Nova tentativa automática em ${falta} s`; if (--falta < 0) { clearInterval(telaAviso.t); iniciar().catch(() => telaForaDoAr()); } };
+  tick(); telaAviso.t = setInterval(tick, 1000);
+  $("#foraTentar").onclick = () => { clearInterval(telaAviso.t); $("#foraCont").textContent = "Conectando…"; iniciar().catch(() => telaForaDoAr()); };
+  $("#foraSair")?.addEventListener("click", () => { clearInterval(telaAviso.t); sair(); });
+}
+function telaManutencao(st) {
+  telaAviso({ icone: "tool", titulo: "Sistema em manutenção", acao: "manut",
+    texto: "Estamos fazendo uma atualização. O app volta sozinho assim que terminar — não precisa fazer nada.",
+    detalhe: st?.mensagem ? esc(st.mensagem) : "", seg: 30 });
+}
+function telaForaDoAr() {
+  const off = !navigator.onLine;
+  telaAviso({ icone: off ? "wifioff" : "cloud", titulo: off ? "Sem internet" : "Sistema temporariamente fora do ar",
+    texto: off ? "Seu celular está sem conexão. Assim que a internet voltar, o app reconecta sozinho."
+      : "Não conseguimos falar com o servidor agora. Pode ser uma instabilidade passageira ou uma atualização em andamento. Aguarde: o app tenta de novo sozinho.",
+    detalhe: "Nada do que já foi registrado se perde: tudo fica guardado no banco de dados.", seg: 20 });
+}
+
 // Bloqueio vale na hora: o banco já nega os dados; aqui o app confere o acesso a cada minuto e ao voltar para a tela
 function vigiarAcesso() {
   clearInterval(vigiarAcesso.t);
   const conferir = async () => {
-    if (!S.eu) return;
-    const { data, error } = await sb.from("usuarios").select("ativo,excluido_em").eq("id", S.eu.id).maybeSingle();
-    if (error && !/fetch|network/i.test(error.message || "")) return sair("Sua sessão expirou. Entre novamente.");
+    if (!S.eu || $(".fora")) return;
+    let { data, error } = await sb.from("usuarios").select("ativo,excluido_em").eq("id", S.eu.id).maybeSingle();
+    if (error && !erroRede(error)) {   // token vencido (celular parado muito tempo): renova antes de desistir
+      await sb.auth.refreshSession().catch(() => {});
+      ({ data, error } = await sb.from("usuarios").select("ativo,excluido_em").eq("id", S.eu.id).maybeSingle());
+      if (error && !erroRede(error)) return sair("Sua sessão expirou. Entre novamente.");
+    }
     if (!error && (!data || !data.ativo || data.excluido_em)) return sair("Seu acesso foi retirado pelo administrador.");
+    const st = await statusSistema();
+    if (!st.erro) { S.status = st; if (st.em_manutencao && !tem("admin")) return telaManutencao(st); }
+    const bm = $("#bannerManut"); if (bm) bm.hidden = !(st.em_manutencao && tem("admin"));
   };
   vigiarAcesso.t = setInterval(conferir, 60000);
   if (!vigiarAcesso.ligado) { vigiarAcesso.ligado = true; document.addEventListener("visibilitychange", () => { if (!document.hidden) conferir(); }); }
@@ -244,7 +299,14 @@ function avisoConexao() {
 }
 addEventListener("offline", avisoConexao);
 addEventListener("online", () => { avisoConexao(); if (S.eu) { toast("Conexão restabelecida."); recarregar(); } });
-async function sair(msg) { clearInterval(vigiarAcesso.t); S.eu = null; $$(".sheet-wrap, .page").forEach((x) => x.remove()); await sb.auth.signOut(); telaLogin(msg); }
+function relatarErro(e) {
+  console.error(e);
+  if (!S.eu || erroRede(e)) return;
+  clearTimeout(relatarErro.t); relatarErro.t = setTimeout(() => toast("Algo não saiu como esperado. Toque em Atualizar (↻) e tente de novo.", true), 80);
+}
+addEventListener("error", (e) => relatarErro(e.error || e.message));
+addEventListener("unhandledrejection", (e) => relatarErro(e.reason));
+async function sair(msg) { clearInterval(vigiarAcesso.t); S.eu = null; S.avisou = false; S.avisos = null; badgesEm = 0; $$(".sheet-wrap, .page").forEach((x) => x.remove()); await sb.auth.signOut(); telaLogin(msg); }
 // a rolagem acontece dentro do app (não na página), o que mantém a barra inferior no lugar no iOS e no Android
 const rolagem = () => $(".main") || document.scrollingElement;
 
@@ -288,13 +350,14 @@ function ir(id) {
         <div class="who"><div class="txt"><b>${esc(S.eu.nome)}</b><small>${S.eu.perfis.map((p) => PERFIS[p].nome).join(" · ")}</small></div>
           <button class="av-btn mob-only" id="btnPerfilM">${av(S.eu.id)}</button></div>
       </header>
+      <div class="banner-manut" id="bannerManut" ${S.status?.em_manutencao && tem("admin") ? "" : "hidden"}>${ic("tool")}Sistema em manutenção: só administradores estão acessando. Desligue em Controles → Sistema.</div>
       <div id="view"></div>
     </div>
   </div>`;
   $(".rail").onclick = (e) => { const a = e.target.closest("[data-r]"); if (a) { e.preventDefault(); ir(a.dataset.r); rolagem().scrollTop = 0; } };
   $("#btnPerfil").onclick = $("#btnPerfilM").onclick = folhaPerfil;
   $("#btnNovaTop")?.addEventListener("click", novaOS);
-  $("#btnAvisos").onclick = () => folhaAvisos();
+  $("#btnAvisos").onclick = async (e) => { e.currentTarget.classList.add("girando"); await atualizarBadges(true); $("#btnAvisos")?.classList.remove("girando"); folhaAvisos(); };
   $("#btnAtualizar").onclick = atualizarTudo;
   ({ inicio: viewInicio, ordens: viewOrdens, painel: viewPainel, usuarios: viewUsuarios, relatorios: viewRelatorios, controles: viewControles })[id]();
   atualizarBadges();
@@ -341,7 +404,14 @@ const vistosKey = () => `osg_avisos_vistos_${S.eu?.id}`;
 const lerVistos = () => { try { return new Set(JSON.parse(localStorage.getItem(vistosKey()) || "[]")); } catch { return new Set(); } };
 const gravarVistos = (set) => { try { localStorage.setItem(vistosKey(), JSON.stringify([...set].slice(-400))); } catch {} };
 function marcarVistos(itens) { const v = lerVistos(); itens.forEach((x) => v.add(chaveAv(x))); gravarVistos(v); }
-async function atualizarBadges() {
+let badgesEm = 0, badgesP = null;
+function atualizarBadges(forcar = false) {
+  if (badgesP) return badgesP;
+  if (!forcar && Date.now() - badgesEm < 20000) return Promise.resolve();
+  badgesP = atualizarBadgesAgora().catch(() => {}).finally(() => { badgesEm = Date.now(); badgesP = null; });
+  return badgesP;
+}
+async function atualizarBadgesAgora() {
   const lst = await pendencias(), v = lerVistos();
   lst.forEach((x) => { x.acao = ACAO.includes(x.tipo); x.visto = !x.acao && v.has(chaveAv(x)); });
   S.avisos = lst;
@@ -400,15 +470,46 @@ function folhaPerfil() {
     corpo: `<div class="perfil-top">${av(S.eu.id, "xl")}<div><b>${esc(S.eu.nome)}</b><small class="mono">${esc(S.eu.login)}</small>
         <div class="acoes-foto"><label class="btn btn-sm">${ic("camera")}${S.usuarios[S.eu.id]?.foto ? "Trocar foto" : "Adicionar foto"}<input type="file" accept="image/*" id="fFoto" hidden></label>
         ${S.usuarios[S.eu.id]?.foto ? `<button class="btn btn-sm btn-ghost" id="rmFoto">Remover</button>` : ""}</div></div></div>
+      <p class="muted" style="font-size:12px;margin:-2px 0 10px">OS Granjas · versão ${VERSAO}</p>
       <div class="label">O que você pode fazer</div><div class="checks">${S.eu.perfis.map((p) => `<label>${esc(PERFIS[p].nome)}<small>${PERFIS[p].faz}</small></label>`).join("")}</div>`,
-    rodape: `<button class="btn" data-fechar>Fechar</button><button class="btn btn-primary" id="btnSair">${ic("logout")}Sair</button>`,
+    rodape: `<button class="btn" id="btnSenha">${ic("cog")}Alterar senha</button><button class="btn btn-primary" id="btnSair">${ic("logout")}Sair</button>`,
     aoAbrir: (el, fechar) => {
       $("#btnSair", el).onclick = async () => { fechar(); sair(); };
+      $("#btnSenha", el).onclick = () => { fechar(); folhaSenha(); };
       const salvar = async (foto) => { await rpc("definir_foto", { p_foto: foto }); await carregarUsuarios(); fechar(); toast(foto ? "Foto atualizada." : "Foto removida."); recarregar(); };
       $("#rmFoto", el)?.addEventListener("click", () => salvar(null).catch((e) => toast(errMsg(e), true)));
       $("#fFoto", el).onchange = async (e) => {
         const f = e.target.files[0]; if (!f) return;
         try { salvar(await reduzirFoto(f)); } catch (err) { toast("Não foi possível usar essa imagem.", true); }
+      };
+    },
+  });
+}
+// Alterar a própria senha: confirma a senha atual antes (o administrador continua podendo redefinir em Usuários)
+function folhaSenha() {
+  folha({
+    titulo: "Alterar senha", sub: "Use pelo menos 8 caracteres. Não use a mesma senha de outros sistemas.",
+    corpo: `<label class="field"><span>Senha atual</span><input class="input" type="password" id="sAtual" autocomplete="current-password"></label>
+      <label class="field"><span>Nova senha</span><input class="input" type="password" id="sNova" autocomplete="new-password"></label>
+      <label class="field"><span>Repita a nova senha</span><input class="input" type="password" id="sConf" autocomplete="new-password"></label>
+      <label class="checks" style="margin-bottom:6px"><label><input type="checkbox" id="sVer">Mostrar senhas</label></label><p class="err" id="sErr"></p>`,
+    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="sOk">Salvar nova senha</button>`,
+    aoAbrir: (el, fechar) => {
+      $("#sVer", el).onchange = (e) => ["sAtual", "sNova", "sConf"].forEach((i) => ($("#" + i, el).type = e.target.checked ? "text" : "password"));
+      $("#sAtual", el).focus();
+      $("#sOk", el).onclick = (e) => {
+        const erro = (t) => ($("#sErr", el).textContent = t), atual = $("#sAtual", el).value, nova = $("#sNova", el).value, conf = $("#sConf", el).value;
+        if (!atual) return erro("Digite a senha atual.");
+        if (nova.length < 8) return erro("A nova senha precisa de pelo menos 8 caracteres.");
+        if (nova !== conf) return erro("As duas senhas novas não são iguais.");
+        if (nova === atual) return erro("A nova senha precisa ser diferente da atual.");
+        busy(e.currentTarget, async () => {
+          const { error: e1 } = await sb.auth.signInWithPassword({ email: `${S.eu.login}@${C.DOMINIO_LOGIN}`, password: atual });
+          if (e1) return erro(/banned/i.test(e1.message) ? "Seu acesso foi retirado." : "Senha atual incorreta.");
+          const { error: e2 } = await sb.auth.updateUser({ password: nova });
+          if (e2) return erro(/different/i.test(e2.message) ? "A nova senha precisa ser diferente da atual." : /weak|short|characters/i.test(e2.message) ? "Senha fraca: use pelo menos 8 caracteres, misturando letras e números." : errMsg(e2));
+          fechar(); toast("Senha alterada. Use a nova senha no próximo acesso.");
+        });
       };
     },
   });
@@ -452,7 +553,7 @@ function sucesso({ titulo, texto, linhas = [], primario, secundario }) {
     },
   });
 }
-function recarregar() { const sel = S.sel; const y = rolagem().scrollTop; ir(S.rota); if (sel && !isMob()) abrirOS(sel); rolagem().scrollTop = y; atualizarBadges(); }
+function recarregar() { const sel = S.sel; const y = rolagem().scrollTop; ir(S.rota); if (sel && !isMob()) abrirOS(sel); rolagem().scrollTop = y; atualizarBadges(true); }
 /* ---------------- cartão de OS ---------------- */
 function acoesRapidas(o) {
   const b = (a, rot, cls = "", i = "") => `<button class="btn btn-sm ${cls}" data-acao="${a}" data-id="${o.id}">${i ? ic(i) : ""}${rot}</button>`;
@@ -1272,7 +1373,7 @@ function confirmar({ titulo, texto, botao, perigo, digitar, ok }) {
 
 /* ---------------- início ---------------- */
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") telaLogin(); });
-iniciar().catch((e) => telaLogin(errMsg(e)));
+iniciar().catch((e) => (erroRede(e) ? telaForaDoAr() : telaLogin(errMsg(e))));
 /* ---------------- Relatórios (resumo consolidado + PDF + Excel) ---------------- */
 function faixaPeriodo(sel, de, ate) {
   const d = (iso) => new Date(`${iso}T00:00:00-03:00`), mais = (x, n) => new Date(x.getTime() + n * 864e5);
@@ -1534,8 +1635,8 @@ function viewControles(aba = S.abaCtl || "mat") {
   const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
   const optM = `<option value="">Todos</option>${mnts.map((u) => `<option value="${u.id}">${esc(u.nome)}${u.excluido_em ? " (excluído)" : !u.ativo ? " (bloqueado)" : ""}</option>`).join("")}`;
   $("#view").innerHTML = `<div class="content">
-    <div class="seg" id="cAba">${[["mat", "Materiais dos carros", "box"], ["jor", "Jornada e pausas", "clock"]].map(([k, r, i]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}</button>`).join("")}</div>
-    ${aba === "mat" ? `
+    <div class="seg" id="cAba">${[["mat", "Materiais dos carros", "box"], ["jor", "Jornada e pausas", "clock"], ["sis", "Sistema", "cog"]].map(([k, r, i]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}</button>`).join("")}</div>
+    ${aba === "sis" ? `<div id="sisOut"><div class="skel"></div></div>` : aba === "mat" ? `
     <section class="card rel-filtros"><div class="rf-grid">
       ${filtroPeriodoHTML("m")}
       <label class="field"><span>Carro (almoxarifado)</span><select class="input" id="mCar"><option value="">Todos</option>${(S.carros || []).map((c) => `<option value="${c.codigo}">${c.codigo}</option>`).join("")}<option value="sem">Sem código (lançamentos antigos)</option></select></label>
@@ -1556,6 +1657,7 @@ function viewControles(aba = S.abaCtl || "mat") {
   </div>`;
   $("#cAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewControles(b.dataset.a); };
   const ligar = (p, fn) => { $(`#${p}Per`).onchange = () => { const x = $(`#${p}Per`).value === "x"; $(`#${p}DeL`).hidden = $(`#${p}AteL`).hidden = !x; fn(); }; };
+  if (aba === "sis") return sistemaDesenhar();
   if (aba === "mat") {
     ligar("m", materiaisBuscar);
     ["mDe", "mAte", "mCar", "mMnt", "mNuc"].forEach((i) => ($("#" + i).onchange = materiaisBuscar));
@@ -1709,4 +1811,25 @@ async function jornadaExcel() {
     ...D.linhas.map((p) => [nomeU(p.manutentor_id), osId(p.os_id), MOTIVOS[p.motivo].rot, p.detalhe || "", dhCompleta(p.inicio), p.fim ? dhCompleta(p.fim) : "em pausa", p.duracao_min, p.excesso_almoco_min, p.apos_expediente ? "Sim" : "Não",
       p.autorizada_por ? nomeU(p.autorizada_por) : "", p.obs_autorizacao || ""])], [24, 10, 24, 28, 16, 16, 13, 19, 16, 22, 30]);
   await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArqCtl("jornada-pausas", D, "xlsx"));
+}
+
+/* ---- sistema: modo manutenção ---- */
+async function sistemaDesenhar() {
+  const st = await statusSistema(); if (st.erro) return toast(errMsg(st.erro), true);
+  S.status = st; const on = !!st.em_manutencao;
+  $("#sisOut").innerHTML = `<section class="card" style="max-width:720px">
+    <h3>Aviso de manutenção</h3>
+    <p class="muted" style="font-size:13px;margin:4px 0 14px">Use antes de uma atualização (banco ou site). Enquanto estiver ligado, técnicos, manutentores, gestores e gerentes veem a tela
+      “Sistema em manutenção” e o app volta sozinho quando você desligar. Administradores continuam entrando normalmente para testar.</p>
+    <div class="zona ${on ? "perigo" : ""}"><div><b>${on ? "Manutenção LIGADA" : "Sistema funcionando normalmente"}</b>
+      <small>${on ? `Ligada em ${fmtDH(st.atualizado_em)}${st.atualizado_por ? " por " + esc(nomeU(st.atualizado_por)) : ""}` : "Todos os usuários estão acessando."}</small></div>
+      <button class="btn ${on ? "btn-primary" : "btn-danger"}" id="sisBtn">${on ? "Desligar manutenção" : "Ligar manutenção"}</button></div>
+    <label class="field" style="margin-top:14px"><span>Mensagem para a equipe <em>(opcional)</em></span>
+      <input class="input" id="sisMsg" maxlength="300" placeholder="Ex.: atualização do sistema, voltamos às 18h" value="${esc(st.mensagem || "")}"></label>
+    <p class="muted" style="font-size:12px">Versão do app: ${VERSAO}</p></section>`;
+  $("#sisBtn").onclick = (e) => confirmar({
+    titulo: on ? "Desligar a manutenção?" : "Ligar a manutenção?", perigo: !on, botao: on ? "Desligar" : "Ligar manutenção",
+    texto: on ? "Todos voltam a acessar em até 1 minuto (ou na hora, ao tocar em “Tentar agora”)." : "Quem estiver usando o app vê a tela de manutenção em até 1 minuto. Registros já feitos não se perdem.",
+    ok: async () => { await rpc("definir_manutencao", { p_ativo: !on, p_mensagem: $("#sisMsg").value }); S.status = await statusSistema();
+      const bm = $("#bannerManut"); if (bm) bm.hidden = !S.status.em_manutencao; toast(on ? "Manutenção desligada." : "Manutenção ligada."); sistemaDesenhar(); } });
 }

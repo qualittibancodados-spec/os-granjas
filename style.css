@@ -937,3 +937,18 @@ table.rt .linkish { font-size: 13px; }
   .topbar .bell { width: 36px; height: 36px; }
   .topbar { gap: 8px; }
 }
+/* telas de manutenção / fora do ar */
+.fora { min-height: 100dvh; display: grid; place-items: center; padding: 24px 18px calc(24px + env(safe-area-inset-bottom));
+  background: radial-gradient(120% 80% at 50% 0%, #D51E2C 0%, #9C0F1B 55%, #6A0B14 100%); }
+.fora-box { width: 100%; max-width: 420px; background: var(--surface); border-radius: 22px; padding: 28px 24px 22px; text-align: center; box-shadow: var(--sh-3); }
+.fora-box img { width: 150px; margin: 0 auto 14px; display: block; }
+.fora-ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 12px; display: grid; place-items: center; background: var(--gold-50); color: var(--gold-600); }
+.fora-ic svg.i { width: 28px; height: 28px; }
+.fora h1 { font-size: 21px; font-weight: 800; letter-spacing: -.02em; margin-bottom: 8px; }
+.fora p { color: var(--muted); font-size: 14.5px; }
+.fora-msg { margin: 14px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13.5px; color: var(--ink-2); }
+.fora-cont { font-size: 12.5px !important; margin: 16px 0 12px; }
+.fora .btn { width: 100%; margin-top: 6px; }
+.banner-manut { display: flex; align-items: center; gap: 8px; margin: 12px 28px 0; padding: 9px 12px; border-radius: 12px; background: var(--gold-50); border: 1px solid #F0DDA6; color: #6B4E00; font-size: 13px; font-weight: 600; }
+.banner-manut svg.i { width: 16px; height: 16px; }
+@media (max-width: 860px) { .banner-manut { margin: 10px 14px 0; } }
