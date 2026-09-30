@@ -952,3 +952,17 @@ table.rt .linkish { font-size: 13px; }
 .banner-manut { display: flex; align-items: center; gap: 8px; margin: 12px 28px 0; padding: 9px 12px; border-radius: 12px; background: var(--gold-50); border: 1px solid #F0DDA6; color: #6B4E00; font-size: 13px; font-weight: 600; }
 .banner-manut svg.i { width: 16px; height: 16px; }
 @media (max-width: 860px) { .banner-manut { margin: 10px 14px 0; } }
+
+/* Correção da barra do topo "espremida":
+   o .main é uma coluna flex com rolagem interna. Em telas com conteúdo longo (Painel, Relatórios, Controles…)
+   o navegador encolhia a barra do topo para caber, porque itens de coluna flex podem diminuir por padrão.
+   Agora a barra (e a faixa de manutenção) nunca encolhem: altura fixa em todas as telas. */
+.topbar, .banner-manut { flex: none; }
+
+/* Logo no topo (celular) e no menu lateral (computador): o PNG do logo tem o brilho externo cortado nas bordas;
+   com a sombra, isso aparecia como uma "caixa" escura atrás do logo. Sem sombra e com a borda suavizada, some. */
+.topbar .mark img, .rail-logo img {
+  filter: none;
+  -webkit-mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 86%, transparent 100%);
+  mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 86%, transparent 100%);
+}
