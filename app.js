@@ -395,6 +395,14 @@ async function pendencias() {
     const muitoVelhas = data.filter((o) => (Date.now() - new Date(o.aberta_em)) / 36e5 > 168).length;
     if (muitoVelhas) itens.push({ tipo: "paradas", titulo: `${muitoVelhas} OS abertas há mais de 7 dias`, texto: "Veja em Ordens → Em aberto.", grupo: "abertas", urg: true });
   }
+  if (tem("admin")) {   // lembrete: backup com mais de 7 dias (ou nunca feito)
+    const { data: bk, error: eBk } = await sb.from("backup_registro").select("feito_em").order("feito_em", { ascending: false }).limit(1);
+    if (!eBk) {
+      const ult = bk?.[0]?.feito_em, dias = ult ? Math.floor((Date.now() - new Date(ult)) / 864e5) : null;
+      if (dias === null || dias >= 7) itens.push({ tipo: "backup", titulo: dias === null ? "Nenhum backup baixado ainda" : `Faz ${dias} dias desde o último backup`,
+        texto: "Baixe uma cópia dos dados: leva 1 minuto (Controles → Sistema → Backup).", rota: "controles", aba: "sis", grupo: dias === null ? "b-nunca" : `b${Math.floor(dias / 7)}` });
+    }
+  }
   return itens.sort((a, b) => (b.urg - a.urg) || (new Date(a.quando || 0) - new Date(b.quando || 0)));
 }
 // Tarefas (precisam de ação) somem sozinhas quando feitas; informativos somem depois de vistos.
@@ -421,7 +429,7 @@ async function atualizarBadgesAgora() {
   if (n && !S.avisou) { S.avisou = true; folhaAvisos(true); }
 }
 const TIPO_AV = { confirmar: ["checkc", "var(--s-aguardando)", "Confirmar"], direcionar: ["send", "var(--s-aberta)", "Direcionar"], devolvida: ["undo", "var(--s-pendente)", "Direcionar de novo"],
-  atender: ["tool", "var(--s-direcionada)", "Abrir"], pausa: ["pause", "#6A6E75"], paradas: ["clock", "var(--s-pendente)"], emergencia: ["alert", "var(--p-EMERGENCIA)"] };
+  atender: ["tool", "var(--s-direcionada)", "Abrir"], pausa: ["pause", "#6A6E75"], paradas: ["clock", "var(--s-pendente)"], emergencia: ["alert", "var(--p-EMERGENCIA)"], backup: ["box", "var(--s-atendimento)"] };
 function folhaAvisos(auto = false) {
   const lst = S.avisos || [], tarefas = lst.filter((x) => x.acao), info = lst.filter((x) => !x.acao && !x.visto), vistos = lst.filter((x) => x.visto);
   const item = (x) => { const [icn, cor, rotAcao] = TIPO_AV[x.tipo], i = lst.indexOf(x);
@@ -446,7 +454,7 @@ function folhaAvisos(auto = false) {
         if (abrir || fazer) {
           const it = lst[+(abrir?.dataset.abrir ?? fazer.dataset.fazer)]; if (!it.acao) marcarVistos([it]); fechar();
           if (fazer && ["direcionar", "devolvida"].includes(it.tipo)) return executar("direcionar", it.os, fazer);
-          if (it.os) abrirOS(it.os); else if (it.grupo) { S.lista.grupo = it.grupo; ir("ordens"); }
+          if (it.rota) { if (it.aba) S.abaCtl = it.aba; ir(it.rota); } else if (it.os) abrirOS(it.os); else if (it.grupo) { S.lista.grupo = it.grupo; ir("ordens"); }
           atualizarBadges();
         }
       });
@@ -1527,12 +1535,13 @@ async function salvarArquivo(blob, nome) {
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   try {
     const f = new File([blob], nome, { type: blob.type });
-    if (ios && navigator.canShare?.({ files: [f] })) { await navigator.share({ files: [f], title: nome }); return; }
-  } catch (e) { if (e?.name === "AbortError") return; }
+    if (ios && navigator.canShare?.({ files: [f] })) { await navigator.share({ files: [f], title: nome }); return true; }
+  } catch (e) { if (e?.name === "AbortError") return false; }
   const url = URL.createObjectURL(blob), a = document.createElement("a");
   a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   toast("Arquivo gerado: " + nome);
+  return true;
 }
 async function logoDataURL() {
   if (C.LOGO.startsWith("data:")) return C.LOGO;
@@ -1813,11 +1822,53 @@ async function jornadaExcel() {
   await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArqCtl("jornada-pausas", D, "xlsx"));
 }
 
-/* ---- sistema: modo manutenção ---- */
+/* ---- sistema: backup e modo manutenção ---- */
+// Proteção do arquivo de backup por senha, feita no próprio navegador (nada sai daqui):
+// formato .osgbackup = "OSGB1" + 1 byte (1 = comprimido) + sal(16) + iv(12) + AES-GCM-256 (chave via PBKDF2-SHA256, 250 mil voltas)
+const OSGB_MAGIC = [0x4f, 0x53, 0x47, 0x42, 0x31];
+async function chaveDaSenha(senha, sal) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(senha), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt: sal, iterations: 250000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function comprimir(bytes) {
+  if (!("CompressionStream" in window)) return null;
+  try { return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer()); } catch { return null; }
+}
+async function cifrarBackup(texto, senha) {
+  const cru = new TextEncoder().encode(texto), zip = await comprimir(cru), dados = zip || cru;
+  const sal = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await chaveDaSenha(senha, sal), dados));
+  const out = new Uint8Array(34 + ct.length); out.set(OSGB_MAGIC, 0); out[5] = zip ? 1 : 0; out.set(sal, 6); out.set(iv, 22); out.set(ct, 34);
+  return out;
+}
+const diasDesde = (ts) => Math.floor((Date.now() - new Date(ts)) / 864e5);
+function statusBackup(lst) {
+  if (!lst.length) return { cls: "ruim", ic: "alert", t: "Nenhum backup baixado ainda", d: "Baixe agora e guarde no drive da empresa." };
+  const u = lst[0], d = diasDesde(u.feito_em);
+  const quando = d === 0 ? "hoje" : d === 1 ? "ontem" : `há ${d} dias`;
+  return { cls: d < 7 ? "ok" : d < 15 ? "atencao" : "ruim", ic: d < 7 ? "checkc" : "alert", t: `Último backup: ${quando}`, d: `${fmtDH(u.feito_em)} · por ${esc(nomeU(u.feito_por))} · ${Math.max(1, Math.round(u.tamanho_bytes / 1024))} KB${u.cifrado ? " · com senha" : ""}` };
+}
 async function sistemaDesenhar() {
   const st = await statusSistema(); if (st.erro) return toast(errMsg(st.erro), true);
   S.status = st; const on = !!st.em_manutencao;
-  $("#sisOut").innerHTML = `<section class="card" style="max-width:720px">
+  const { data: regs, error: eReg } = await sb.from("backup_registro").select("*").order("feito_em", { ascending: false }).limit(8);
+  const bkOk = !eReg, lst = regs || [], sb2 = statusBackup(lst);
+  const cardBackup = `<section class="card bkp" style="max-width:720px;margin-bottom:14px">
+    <div class="bkp-h"><span class="kpi-ic" style="--kc:#1E8E4E">${ic("box")}</span><div><h3>Backup dos dados</h3>
+      <p class="muted">Baixa uma cópia de <b>tudo</b>: OS, histórico, pausas, materiais, usuários e logins. Se um dia precisar, dá para importar de volta sem perder nada.</p></div></div>
+    ${bkOk ? `<div class="bkp-st ${sb2.cls}">${ic(sb2.ic)}<div><b>${sb2.t}</b><small>${sb2.d}</small></div></div>
+    <label class="bkp-cif"><input type="checkbox" id="bkCif" checked><span><b>Proteger o arquivo com senha</b> (recomendado)<small>O arquivo tem dados pessoais e as senhas criptografadas dos usuários.</small></span></label>
+    <div id="bkSenhas" class="bkp-senhas">
+      <label class="field"><span>Senha do backup <em>(mínimo 10 caracteres)</em></span><input class="input" type="password" id="bkS1" autocomplete="new-password"></label>
+      <label class="field"><span>Repita a senha</span><input class="input" type="password" id="bkS2" autocomplete="new-password"></label>
+      <div class="note"><b>Guarde esta senha.</b> Sem ela o backup não abre e <b>não existe como recuperar</b>. Anote em um lugar seguro (e com uma segunda pessoa de confiança).</div>
+    </div>
+    <div class="acoes"><button class="btn btn-primary" id="bkBaixar">${ic("download")}Baixar backup completo</button><button class="btn" id="bkComo">Como restaurar</button></div>
+    ${lst.length ? `<details class="bkp-hist"><summary>Últimos backups (${lst.length})</summary><div class="tbl"><table class="t"><thead><tr><th>Quando</th><th>Quem</th><th class="n">Tamanho</th><th>Senha</th></tr></thead><tbody>
+      ${lst.map((r) => `<tr><td>${fmtDH(r.feito_em)}</td><td>${esc(nomeU(r.feito_por))}</td><td class="n">${Math.max(1, Math.round(r.tamanho_bytes / 1024))} KB</td><td>${r.cifrado ? "sim" : "não"}</td></tr>`).join("")}</tbody></table></div></details>` : ""}`
+    : `<div class="note"><b>Falta instalar a atualização do banco.</b> Rode o arquivo <b>07_backup.sql</b> no SQL Editor do Supabase (uma vez) para liberar o backup.</div>`}
+  </section>`;
+  const cardManut = `<section class="card" style="max-width:720px">
     <h3>Aviso de manutenção</h3>
     <p class="muted" style="font-size:13px;margin:4px 0 14px">Use antes de uma atualização (banco ou site). Enquanto estiver ligado, técnicos, manutentores, gestores e gerentes veem a tela
       “Sistema em manutenção” e o app volta sozinho quando você desligar. Administradores continuam entrando normalmente para testar.</p>
@@ -1827,9 +1878,54 @@ async function sistemaDesenhar() {
     <label class="field" style="margin-top:14px"><span>Mensagem para a equipe <em>(opcional)</em></span>
       <input class="input" id="sisMsg" maxlength="300" placeholder="Ex.: atualização do sistema, voltamos às 18h" value="${esc(st.mensagem || "")}"></label>
     <p class="muted" style="font-size:12px">Versão do app: ${VERSAO}</p></section>`;
+  $("#sisOut").innerHTML = cardBackup + cardManut;
+
+  if (bkOk) {
+    const cif = $("#bkCif"), caixa = $("#bkSenhas");
+    cif.onchange = () => (caixa.hidden = !cif.checked);
+    $("#bkComo").onclick = folhaComoRestaurar;
+    $("#bkBaixar").onclick = (e) => busy(e.currentTarget, async () => {
+      const protegido = cif.checked, senha = $("#bkS1").value;
+      if (protegido) {
+        if (senha.length < 10) return toast("A senha do backup precisa de pelo menos 10 caracteres.", true);
+        if (senha !== $("#bkS2").value) return toast("As duas senhas não são iguais.", true);
+        if (!crypto?.subtle) return toast("Este navegador não suporta proteger com senha. Use o Chrome ou o Safari atualizados.", true);
+      }
+      const sql = await rpc("gerar_backup");
+      if (typeof sql !== "string" || sql.length < 300) throw new Error("O backup veio vazio. Tente de novo.");
+      const carimbo = new Date().toLocaleString("sv-SE", { timeZone: TZ }).slice(0, 16).replace(" ", "_").replace(":", "");
+      const blob = protegido ? new Blob([await cifrarBackup(sql, senha)], { type: "application/octet-stream" }) : new Blob([sql], { type: "text/plain;charset=utf-8" });
+      const nome = `backup_os-granjas_${carimbo}.${protegido ? "osgbackup" : "sql"}`;
+      if (await salvarArquivo(blob, nome)) {
+        await rpc("registrar_backup", { p_tamanho: blob.size, p_cifrado: protegido });
+        toast(`Backup salvo (${Math.max(1, Math.round(blob.size / 1024))} KB). Guarde no drive da empresa.`); atualizarBadges(true); sistemaDesenhar();
+      }
+    });
+  }
   $("#sisBtn").onclick = (e) => confirmar({
     titulo: on ? "Desligar a manutenção?" : "Ligar a manutenção?", perigo: !on, botao: on ? "Desligar" : "Ligar manutenção",
     texto: on ? "Todos voltam a acessar em até 1 minuto (ou na hora, ao tocar em “Tentar agora”)." : "Quem estiver usando o app vê a tela de manutenção em até 1 minuto. Registros já feitos não se perdem.",
     ok: async () => { await rpc("definir_manutencao", { p_ativo: !on, p_mensagem: $("#sisMsg").value }); S.status = await statusSistema();
       const bm = $("#bannerManut"); if (bm) bm.hidden = !S.status.em_manutencao; toast(on ? "Manutenção desligada." : "Manutenção ligada."); sistemaDesenhar(); } });
+}
+function folhaComoRestaurar() {
+  folha({
+    titulo: "Como restaurar um backup", sub: "Sempre em um projeto NOVO e VAZIO do Supabase", tam: "lg",
+    corpo: `<div class="note"><b>Antes:</b> tenha em mãos o arquivo do backup, o arquivo <b>00_instalacao_completa.sql</b> (na pasta do projeto) e, se o backup tem senha, a ferramenta <b>abrir-backup.html</b>.</div>
+      <ol class="passos-bkp">
+        <li><b>Backup com senha?</b> Abra o <b>abrir-backup.html</b> (duplo clique), escolha o arquivo <b>.osgbackup</b>, digite a senha e clique em <b>Abrir</b>. Ele baixa o arquivo <b>.sql</b>. Nada sai do seu computador.</li>
+        <li>No Supabase, crie um <b>projeto novo</b> (região São Paulo).</li>
+        <li><b>SQL Editor → nova consulta:</b> cole o conteúdo de <b>00_instalacao_completa.sql</b> e clique em <b>Run</b>. Isso instala a estrutura do sistema.</li>
+        <li><b>SQL Editor → nova consulta:</b> cole o conteúdo do <b>.sql do backup</b> e clique em <b>Run</b>. Se o Supabase avisar de “operação destrutiva”, confirme.</li>
+        <li>No fim aparece uma tabela: <b>todas as linhas devem mostrar OK</b>.</li>
+        <li>Publique de novo a função <b>admin-usuarios</b>, desligue o cadastro aberto e troque o endereço e a chave no <b>config.js</b> do site.</li>
+      </ol>
+      <div class="note"><b>Segurança:</b> se o projeto de destino já tiver dados, o arquivo <b>se recusa a rodar</b> e não muda nada.</div>
+      <div class="note"><b>Arquivo grande?</b> Se o backup passar de uns 5 MB, o SQL Editor pode travar ao colar. O Supabase recomenda o <b>psql</b> para restaurar arquivos grandes (sem limite de tamanho): o comando está no começo do próprio arquivo .sql. Se precisar, peça ajuda.</div>
+      <div class="acoes"><button class="btn" id="bkFerr">${ic("download")}Baixar a ferramenta “Abrir backup”</button></div>`,
+    rodape: `<button class="btn btn-primary" data-fechar>Entendi</button>`,
+    aoAbrir: (el) => { $("#bkFerr", el).onclick = (e) => busy(e.currentTarget, async () => {
+      const r = await fetch("abrir-backup.html", { cache: "no-cache" }); if (!r.ok) throw new Error("Não consegui baixar a ferramenta agora.");
+      await salvarArquivo(new Blob([await r.text()], { type: "text/html;charset=utf-8" }), "abrir-backup.html"); }); },
+  });
 }

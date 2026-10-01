@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Abrir backup — OS Manutenção Granjas</title>
+<style>
+  :root { --brand: #DF2331; --brand-d: #B5141F; --ink: #221B17; --muted: #7C7169; --line: #EAE3DA; --bg: #F6F3EF; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 20px; background: linear-gradient(180deg, #B3121F 0%, #7E0C16 100%);
+         font: 15px/1.5 "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); }
+  main { width: 100%; max-width: 480px; background: #fff; border-radius: 20px; padding: 28px 24px 22px; box-shadow: 0 20px 50px rgba(0, 0, 0, .3); }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -.01em; }
+  p.sub { color: var(--muted); margin: 0 0 18px; font-size: 14px; }
+  label { display: block; font-weight: 600; font-size: 13.5px; margin-bottom: 14px; }
+  input[type=file], input[type=password] { display: block; width: 100%; margin-top: 6px; padding: 11px 12px; font: inherit; border: 1px solid #CDC5BB; border-radius: 11px; background: #fff; }
+  input:focus { outline: 2px solid rgba(223, 35, 49, .35); border-color: var(--brand); }
+  button { width: 100%; min-height: 48px; border: 0; border-radius: 12px; font-family: inherit; font-weight: 700; font-size: 15px; background: linear-gradient(180deg, #E6343F, #C91A27); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  .msg { margin-top: 14px; padding: 11px 13px; border-radius: 11px; font-size: 14px; display: none; }
+  .msg.erro { display: block; background: #FDEEEE; border: 1px solid #F3C7C9; color: #8E1019; }
+  .msg.ok { display: block; background: #EAF7EF; border: 1px solid #BFE3CE; color: #14683B; }
+  .rodape { margin-top: 16px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Abrir backup</h1>
+  <p class="sub">OS Manutenção Granjas · Qualitti Alimentos</p>
+  <label>Arquivo do backup (.osgbackup)
+    <input type="file" id="arq" accept=".osgbackup,application/octet-stream">
+  </label>
+  <label>Senha do backup
+    <input type="password" id="senha" autocomplete="off">
+  </label>
+  <button id="abrir">Abrir e baixar o arquivo .sql</button>
+  <div class="msg" id="msg" role="status"></div>
+  <p class="rodape">Tudo acontece <b>dentro do seu navegador</b>: o arquivo e a senha não são enviados para lugar nenhum. Esta página funciona sem internet.</p>
+</main>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const MAGIC = [0x4f, 0x53, 0x47, 0x42, 0x31]; // "OSGB1"
+function mostrar(tipo, texto) { const m = $("#msg"); m.className = "msg " + tipo; m.textContent = texto; }
+
+async function abrir() {
+  const f = $("#arq").files[0], senha = $("#senha").value;
+  if (!f) return mostrar("erro", "Escolha o arquivo do backup (.osgbackup).");
+  if (!senha) return mostrar("erro", "Digite a senha do backup.");
+  if (!window.crypto?.subtle) return mostrar("erro", "Este navegador não tem os recursos de segurança necessários. Use o Chrome, Edge ou Safari atualizados.");
+  const dados = new Uint8Array(await f.arrayBuffer());
+  if (dados.length < 50 || !MAGIC.every((b, i) => dados[i] === b)) return mostrar("erro", "Este arquivo não parece ser um backup do sistema (.osgbackup).");
+  const comprimido = dados[5] === 1, sal = dados.slice(6, 22), iv = dados.slice(22, 34), ct = dados.slice(34);
+  let claro;
+  try {
+    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(senha), "PBKDF2", false, ["deriveKey"]);
+    const chave = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: sal, iterations: 250000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    claro = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, chave, ct));
+  } catch { return mostrar("erro", "Senha incorreta, ou o arquivo está danificado. Confira a senha e tente de novo."); }
+  if (comprimido) {
+    if (!("DecompressionStream" in window)) return mostrar("erro", "Este navegador não sabe abrir arquivos comprimidos. Use o Chrome ou o Edge atualizados.");
+    try { claro = new Uint8Array(await new Response(new Blob([claro]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()); }
+    catch { return mostrar("erro", "O arquivo foi aberto, mas está danificado por dentro. Tente outro backup."); }
+  }
+  const texto = new TextDecoder().decode(claro);
+  if (!texto.includes("BACKUP — OS Manutenção Granjas")) return mostrar("erro", "A senha abriu o arquivo, mas o conteúdo não é um backup do sistema.");
+  const nome = f.name.replace(/\.osgbackup$/i, "") + ".sql";
+  const url = URL.createObjectURL(new Blob([texto], { type: "text/plain;charset=utf-8" })), a = document.createElement("a");
+  a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  mostrar("ok", `Pronto! Baixei "${nome}" (${Math.round(texto.length / 1024)} KB). Agora cole o conteúdo no SQL Editor do projeto novo.`);
+}
+$("#abrir").onclick = async () => {
+  const botao = $("#abrir");   // guardado antes do "await": depois dele o navegador zera o evento
+  botao.disabled = true;
+  try { await abrir(); } catch (err) { mostrar("erro", "Não consegui abrir: " + (err?.message || err)); } finally { botao.disabled = false; }
+};
+$("#senha").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#abrir").click(); });
+</script>
+</body>
+</html>
