@@ -155,6 +155,17 @@ function toast(msg, bad = false) {
 const erroRede = (e) => /fetch|network|abort|timeout|Load failed/i.test(e?.message || e?.name || String(e));
 const errMsg = (e) => { const m = e?.message || String(e); return erroRede(e) ? (navigator.onLine ? "O servidor demorou para responder. Verifique o sinal e tente de novo." : "Sem conexão. Verifique a internet e tente de novo.") : m; };
 async function rpc(n, a) { const { data, error } = await sb.rpc(n, a); if (error) throw error; return data; }
+// O Supabase devolve no máximo 1.000 linhas por consulta: busca em partes até acabar (painel, relatórios, controles)
+async function todas(q, limite = 200000) {
+  const LOTE = 1000; let tudo = [];
+  for (let i = 0; i < limite; i += LOTE) {
+    const { data, error } = await q.range(i, i + LOTE - 1);
+    if (error) return { data: null, error };
+    tudo = tudo.concat(data || []);
+    if (!data || data.length < LOTE) break;
+  }
+  return { data: tudo, error: null };
+}
 async function busy(btn, fn) { btn.disabled = true; try { await fn(); } catch (e) { toast(errMsg(e), true); } finally { btn.disabled = false; } }
 
 /* ---------------- login ---------------- */
@@ -1164,14 +1175,14 @@ async function viewPainel() {
 async function carregarPainel() {
   const tok = S.tok, dias = +$("#pPer").value, nuc = $("#pNuc").value ? +$("#pNuc").value : null;
   const ini0 = new Date(`${hojeISO(-dias + 1)}T00:00:00-03:00`), fim0 = new Date(Date.now() + 864e5);
-  let qL = sb.from("vw_os_lead").select("*").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).range(0, 4999);
-  let qA = sb.from("ordens_servico").select("id,status,aberta_em,nucleo_id,manutentor_id,prioridade,pausada_em,pausa_motivo").in("status", ABERTOS).range(0, 4999);
-  const qP = sb.from("os_pausas").select("*").gte("inicio", ini0.toISOString()).range(0, 9999);
-  const qT = sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade)").gte("direcionada_em", ini0.toISOString()).range(0, 9999);
+  let qL = sb.from("vw_os_lead").select("*").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).order("id");
+  let qA = sb.from("ordens_servico").select("id,status,aberta_em,nucleo_id,manutentor_id,prioridade,pausada_em,pausa_motivo").in("status", ABERTOS).order("id");
+  const qP = sb.from("os_pausas").select("*").gte("inicio", ini0.toISOString()).order("id");
+  const qT = sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade)").gte("direcionada_em", ini0.toISOString()).order("id");
   if (nuc) { qL = qL.eq("nucleo_id", nuc); qA = qA.eq("nucleo_id", nuc); }
-  let qAnt = sb.from("vw_os_lead").select("status,min_lead_total,min_ate_inicio").gte("aberta_em", new Date(ini0 - dias * 864e5).toISOString()).lt("aberta_em", ini0.toISOString()).range(0, 4999);
+  let qAnt = sb.from("vw_os_lead").select("status,min_lead_total,min_ate_inicio").gte("aberta_em", new Date(ini0 - dias * 864e5).toISOString()).lt("aberta_em", ini0.toISOString()).order("id");
   if (nuc) qAnt = qAnt.eq("nucleo_id", nuc);
-  const [rL, rA, rT, rP, rAnt] = await Promise.all([qL, qA, qT, qP, qAnt]);
+  const [rL, rA, rT, rP, rAnt] = await Promise.all([todas(qL), todas(qA), todas(qT), todas(qP), todas(qAnt)]);
   if (tok !== S.tok) return;
   const L = rL.data, A = rA.data, T = rT.data.filter((a) => !nuc || a.ordens_servico?.nucleo_id === nuc);
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
@@ -1468,12 +1479,12 @@ async function gerarRelatorio() {
   const mnt = $("#rMnt").value, nuc = $("#rNuc").value ? +$("#rNuc").value : null, prio = $("#rPrio").value;
   const dentro = (ts) => ts && new Date(ts) >= ini0 && new Date(ts) < fim0;
   const antes = new Date(ini0.getTime() - 90 * 864e5).toISOString();
-  let qL = sb.from("vw_os_lead").select("*").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).range(0, 9999);
+  let qL = sb.from("vw_os_lead").select("*").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).order("id");
   if (nuc) qL = qL.eq("nucleo_id", nuc); if (prio) qL = qL.eq("prioridade", prio);
-  const [rL, rT, rP, rO] = await Promise.all([qL,
-    sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade,equipamento,descricao,galpoes)").gte("direcionada_em", antes).range(0, 19999),
-    sb.from("os_pausas").select("*").gte("inicio", antes).range(0, 19999),
-    sb.from("ordens_servico").select("id,descricao,equipamento,galpoes,status,pausada_em,pausa_motivo").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).range(0, 9999)]);
+  const [rL, rT, rP, rO] = await Promise.all([todas(qL),
+    todas(sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade,equipamento,descricao,galpoes)").gte("direcionada_em", antes).order("id")),
+    todas(sb.from("os_pausas").select("*").gte("inicio", antes).order("id")),
+    todas(sb.from("ordens_servico").select("id,descricao,equipamento,galpoes,status,pausada_em,pausa_motivo").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).order("id"))]);
   if (tok !== S.tok) return;
   const err = rL.error || rT.error || rP.error; if (err) return toast(errMsg(err), true);
   const osInfo = Object.fromEntries(rO.data.map((o) => [o.id, o]));
@@ -1736,7 +1747,7 @@ async function materiaisBuscar() {
   if (av2) q = q.contains("galpoes", [av2]);
   if (os) q = q.eq("os_id", os);
   if (t) q = q.or(`codigo.ilike.*${t}*,material.ilike.*${t}*`);
-  const { data, error } = await q.order("registrado_em", { ascending: false }).range(0, 19999);
+  const { data, error } = await todas(q.order("registrado_em", { ascending: false }).order("id", { ascending: false }));
   if (tok !== S.tok) return;
   if (error) return toast(errMsg(error), true);
   S.ctlMat = { linhas: data, rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Carro", car === "sem" ? "Sem código" : car || "Todos"],
@@ -1797,7 +1808,7 @@ async function jornadaBuscar() {
   const tok = S.tok, [ini0, fim0, rot] = lerPeriodo("j"), mnt = $("#jMnt").value;
   let q = sb.from("vw_pausas").select("*").gte("inicio", ini0.toISOString()).lt("inicio", fim0.toISOString());
   if (mnt) q = q.eq("manutentor_id", mnt);
-  const { data, error } = await q.order("inicio", { ascending: false }).range(0, 19999);
+  const { data, error } = await todas(q.order("inicio", { ascending: false }).order("id", { ascending: false }));
   if (tok !== S.tok) return;
   if (error) return toast(errMsg(error), true);
   S.ctlJor = { linhas: data.filter((p) => !ehEtapa(p.motivo)), rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"]] };
