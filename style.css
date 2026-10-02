@@ -985,3 +985,7 @@ table.rt .linkish { font-size: 13px; }
 .bkp-hist { margin-top: 14px; }
 .bkp-hist summary { cursor: pointer; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .passos-bkp { padding-left: 20px; margin: 12px 0; } .passos-bkp li { margin-bottom: 9px; }
+/* etapas do atendimento (deslocamento / material) */
+.st.etapa { --sc: #2F6BD9; color: #2F6BD9; background: color-mix(in srgb, #2F6BD9 10%, white); }
+.st.etapa.longa { color: var(--brand-600); background: var(--brand-50); }
+.os-actions .btn { flex: 1 1 0; min-width: 0; }

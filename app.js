@@ -55,6 +55,7 @@ const P = {
   silo: '<path d="M6 21V8a6 6 0 0 1 12 0v13M4 21h16M6 12h12M6 16h12"/>',
   roof: '<path d="M3 11 12 4l9 7M5 10v10h14V10M9 20v-6h6v6"/>',
   gate: '<path d="M3 21V5M21 21V5M3 9h18M3 15h18M8 9v6M13 9v6M18 9v6"/>',
+  truck: '<path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2M15 18H9M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>',
   pause: '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>',
   coffee: '<path d="M10 2v2M14 2v2M6 2v2M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
@@ -106,7 +107,11 @@ const MOTIVOS = {
   EXPEDIENTE: { rot: "Fim do expediente", i: "moon", lim: 16 * 60 },
   OUTRA_OS: { rot: "Atender outra OS", i: "alert", lim: null },
   OUTRO: { rot: "Outro motivo", i: "dots", lim: 120 },
+  // etapas do atendimento: contam como TRABALHO (horas), mas não como execução do serviço
+  DESLOCAMENTO: { rot: "Deslocamento", i: "truck", lim: 90, etapa: "Em deslocamento", volta: "Cheguei · iniciar serviço" },
+  MATERIAL: { rot: "Buscando material (almoxarifado)", i: "box", lim: 60, etapa: "Buscando material", volta: "Voltei · continuar serviço" },
 };
+const ehEtapa = (m) => !!MOTIVOS[m]?.etapa;
 const pausaMin = (o) => (o.pausada_em ? (Date.now() - new Date(o.pausada_em)) / 6e4 : 0);
 const pausaLonga = (o) => o.pausada_em && MOTIVOS[o.pausa_motivo]?.lim != null && pausaMin(o) > MOTIVOS[o.pausa_motivo].lim;
 const UNIDADES = ["un", "m", "kg", "L", "pç", "cx", "rolo", "par"];
@@ -130,7 +135,9 @@ const nomeN = (id) => S.nucleoPorId[id]?.nome ?? "—";
 const local = (l) => { const v = [...(l || [])].sort((a, b) => a - b); return !v.length ? "Toda a granja" : v.length === 1 ? `Aviário ${v[0]}` : `Aviários ${v.join(", ")}`; };
 const localCurto = (l) => { const v = [...(l || [])].sort((a, b) => a - b); return !v.length ? "Granja toda" : `Av. ${v.join(", ")}`; };
 const sev = (p) => p ? `<span class="sev" style="--pc:${PCOR[p]}">${PRIO[p].rot}</span>` : `<span class="sev none">A classificar</span>`;
-const stTag = (s, o) => o?.pausada_em && s === "EM ATENDIMENTO"
+const stTag = (s, o) => o?.pausada_em && s === "EM ATENDIMENTO" && ehEtapa(o.pausa_motivo)
+  ? `<span class="st etapa${pausaLonga(o) ? " longa" : ""}">${ic(MOTIVOS[o.pausa_motivo].i)}${MOTIVOS[o.pausa_motivo].etapa} · ${fmtMin(pausaMin(o))}</span>`
+  : o?.pausada_em && s === "EM ATENDIMENTO"
   ? `<span class="st pausa${pausaLonga(o) ? " longa" : ""}">${ic("pause")}Pausada · ${MOTIVOS[o.pausa_motivo].rot.split(" /")[0].split(" ou")[0]} · ${fmtMin(pausaMin(o))}</span>`
   : `<span class="st" style="--sc:${STATUS[s].c}">${ic(STATUS[s].i)}${STATUS[s].rot}</span>`;
 const eqIcon = (e) => (EQUIP.find(([n]) => n === e) || [0, "cog"])[1];
@@ -567,8 +574,8 @@ function acoesRapidas(o) {
   const b = (a, rot, cls = "", i = "") => `<button class="btn btn-sm ${cls}" data-acao="${a}" data-id="${o.id}">${i ? ic(i) : ""}${rot}</button>`;
   if (tem("manutentor") && o.manutentor_id === S.eu.id) {
     if (o.status === "DIRECIONADA") return `<div class="os-actions">${b("recusar", "Recusar", "btn-danger")}${b("iniciar", "Iniciar", "btn-primary", "play")}</div>`;
-    if (o.status === "EM ATENDIMENTO" && o.pausada_em) return `<div class="os-actions">${b("retomar", "Retomar atendimento", "btn-primary", "play")}</div>`;
-    if (o.status === "EM ATENDIMENTO") return `<div class="os-actions">${b("pausar", "Pausar", "", "pause")}${b("finalizar", "Finalizar", "btn-primary", "flag")}</div>`;
+    if (o.status === "EM ATENDIMENTO" && o.pausada_em) return `<div class="os-actions">${b("retomar", ehEtapa(o.pausa_motivo) ? MOTIVOS[o.pausa_motivo].volta : "Retomar atendimento", "btn-primary", "play")}</div>`;
+    if (o.status === "EM ATENDIMENTO") return `<div class="os-actions">${b("material", "Material", "", "box")}${b("pausar", "Pausar", "", "pause")}${b("finalizar", "Finalizar", "btn-primary", "flag")}</div>`;
   }
   if (tem("tecnico") && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
     return `<div class="os-actions">${b("naoresolvido", "Não resolvido", "btn-danger")}${b("confirmar", "Resolvido", "btn-primary", "check")}</div>`;
@@ -765,14 +772,17 @@ function proximoPasso(o) {
   if (tem("gestor") && ["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(o.status))
     return box("var(--s-aberta)", "send", "Precisa de direcionamento", "Defina a classificação e escolha quem vai atender.", b("direcionar", "Classificar e direcionar", "btn-primary", "send"));
   if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "DIRECIONADA")
-    return box("var(--s-direcionada)", "tool", "Direcionada para você", "Inicie quando começar o serviço. Se não puder atender, recuse explicando o motivo.",
+    return box("var(--s-direcionada)", "tool", "Direcionada para você", "Ao sair para atender, toque em Iniciar e diga se está indo até o local, indo buscar material ou se já vai começar o serviço. Se não puder atender, recuse explicando o motivo.",
       b("recusar", "Recusar", "btn-danger") + b("iniciar", "Iniciar atendimento", "btn-primary", "play"));
+  if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "EM ATENDIMENTO" && o.pausada_em && ehEtapa(o.pausa_motivo))
+    return box("#2F6BD9", MOTIVOS[o.pausa_motivo].i, `${MOTIVOS[o.pausa_motivo].etapa} · há ${fmtMin(pausaMin(o))}`, o.pausa_motivo === "DESLOCAMENTO" ? "O deslocamento conta como trabalho, mas não como tempo de serviço. Chegou ao local? Toque abaixo para começar o serviço." : "A ida ao almoxarifado conta como trabalho, mas não como tempo de serviço. Voltou? Toque abaixo para continuar.",
+      b("retomar", MOTIVOS[o.pausa_motivo].volta, "btn-primary", "play"));
   if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "EM ATENDIMENTO" && o.pausada_em)
     return box("#6A6E75", "pause", `Pausado · ${MOTIVOS[o.pausa_motivo].rot} · há ${fmtMin(pausaMin(o))}`, "O tempo da pausa não conta como execução. Retome quando voltar ao serviço.",
       b("retomar", "Retomar atendimento", "btn-primary", "play"));
   if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "EM ATENDIMENTO")
-    return box("var(--s-atendimento)", "flag", `Em atendimento há ${idade(o.iniciada_em)}`, "Vai almoçar ou esperar peça? Pause. Ao terminar, finalize descrevendo o que foi feito.",
-      b("pausar", "Pausar", "", "pause") + b("finalizar", "Finalizar atendimento", "btn-primary", "flag"));
+    return box("var(--s-atendimento)", "flag", `Executando o serviço · atendimento iniciado há ${idade(o.iniciada_em)}`, "Precisa ir ao almoxarifado? Toque em Material. Vai almoçar ou parar? Pause. Ao terminar, finalize descrevendo o que foi feito.",
+      b("material", "Material", "", "box") + b("pausar", "Pausar", "", "pause") + b("finalizar", "Finalizar atendimento", "btn-primary", "flag"));
   if (tem("tecnico") && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
     return box("var(--s-aguardando)", "checkc", "O manutentor finalizou", "Confira no local e confirme se o serviço foi resolvido.",
       b("naoresolvido", "Não resolvido", "btn-danger") + b("confirmar", "Confirmar: resolvido", "btn-primary", "check"));
@@ -798,10 +808,11 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
     <div class="cycle-h">${av(a.manutentor_id, "sm")}<b>${esc(nomeU(a.manutentor_id))}</b><small>Atendimento ${a.ciclo}</small>${a.resultado ? `<span class="tag ${RES[a.resultado][0]}">${RES[a.resultado][1]}</span>` : a.finalizada_em ? `<span class="tag">Aguardando técnico</span>` : `<span class="tag">Em curso</span>`}</div>
     <small>Direcionada ${fmtDH(a.direcionada_em)}${a.iniciada_em ? ` · início ${fmtDH(a.iniciada_em)}` : ""}${a.finalizada_em ? ` · término ${fmtDH(a.finalizada_em)}` : ""}</small>
     ${(() => { const pz = pausas.filter((p) => p.atendimento_id === a.id); if (!pz.length) return "";
-      const tot = pz.reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
+      const dur = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, soma = (f) => pz.filter(f).reduce((s2, p) => s2 + dur(p), 0);
+      const tot = soma(() => true), des = soma((p) => p.motivo === "DESLOCAMENTO"), mat = soma((p) => p.motivo === "MATERIAL"), par = tot - des - mat;
       const bruto = a.finalizada_em ? (new Date(a.finalizada_em) - new Date(a.iniciada_em)) / 6e4 : null;
-      return `<div class="kv"><b>Pausas (${pz.length}) · ${fmtMin(tot)} parado${bruto != null ? ` · execução líquida ${fmtMin(bruto - tot)}` : ""}</b>
-        <ul class="mats">${pz.map((p) => `<li><span>${ic(MOTIVOS[p.motivo].i)} ${MOTIVOS[p.motivo].rot}${p.detalhe ? `<small class="muted">${esc(p.detalhe)}</small>` : ""}</span><b>${p.fim ? fmtMin((new Date(p.fim) - new Date(p.inicio)) / 6e4) : "em pausa"}</b></li>`).join("")}</ul></div>`; })()}
+      return `<div class="kv"><b>${[bruto != null ? `Serviço ${fmtMin(bruto - tot)}` : "", des ? `Deslocamento ${fmtMin(des)}` : "", mat ? `Material ${fmtMin(mat)}` : "", par ? `Pausas ${fmtMin(par)}` : ""].filter(Boolean).join(" · ")}</b>
+        <ul class="mats">${pz.map((p) => `<li><span>${ic(MOTIVOS[p.motivo].i)} ${MOTIVOS[p.motivo].rot}${p.detalhe ? `<small class="muted">${esc(p.detalhe)}</small>` : ""}</span><b>${p.fim ? fmtMin((new Date(p.fim) - new Date(p.inicio)) / 6e4) : ehEtapa(p.motivo) ? "agora" : "em pausa"}</b></li>`).join("")}</ul></div>`; })()}
     ${a.motivo_recusa ? `<div class="kv"><b>Motivo da recusa</b><p>${esc(a.motivo_recusa)}</p></div>` : ""}
     ${a.servico_realizado ? `<div class="kv"><b>O que foi feito</b><p>${esc(a.servico_realizado)}</p></div>` : ""}
     ${a.finalizada_em ? `<div class="kv"><b>Material do estoque do carro${a.materiais_carro?.[0]?.almoxarifado ? ` · carro ${a.materiais_carro[0].almoxarifado}` : ""}</b>${a.materiais_carro?.length ? `<ul class="mats">${a.materiais_carro.map((m) => `<li><span>${esc(m.material)}<small class="muted mono">${esc(m.codigo)}${m.controle ? ` · ${esc(m.controle)}` : ""}</small></span><b>${m.quantidade} ${esc(m.unidade)}</b></li>`).join("")}</ul>` : `<p class="muted">Não usou</p>`}</div>` : ""}
@@ -823,7 +834,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
     <div data-tab="hist" hidden><ul class="timeline">${linha}</ul></div>
     ${lead ? `<div data-tab="lead" hidden><div class="lead-strip">
       <div><b>${fmtMin(lead.min_abertura_direcionamento)}</b><small>Até direcionar</small></div><div><b>${fmtMin(lead.min_espera_inicio)}</b><small>Espera p/ iniciar</small></div>
-      <div><b>${fmtMin(lead.min_execucao)}</b><small>Execução líquida${lead.min_pausas ? ` · ${fmtMin(lead.min_pausas)} em pausa` : ""}</small></div><div><b>${fmtMin(lead.min_lead_total)}</b><small>Lead total</small></div></div></div>` : ""}
+      <div><b>${fmtMin(lead.min_execucao)}</b><small>Serviço (execução)${(() => { const d = (m) => pausas.filter((p) => p.motivo === m).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0); const des = d("DESLOCAMENTO"), mat = d("MATERIAL"); return (des ? ` · ${fmtMin(des)} deslocamento` : "") + (mat ? ` · ${fmtMin(mat)} material` : ""); })()}</small></div><div><b>${fmtMin(lead.min_lead_total)}</b><small>Lead total</small></div></div></div>` : ""}
   </div>`;
 }
 
@@ -834,9 +845,11 @@ async function executar(acao, id, btn) {
   const resumo = [["OS", `<span class="mono">${osId(o.id)}</span>`], ["Serviço", esc(o.descricao)], ["Onde", `${esc(nomeN(o.nucleo_id))} · ${local(o.galpoes)}`]];
   const fim = (titulo, texto, linhas) => { fecharPagina(); recarregar(); sucesso({ titulo, texto, linhas,
     primario: { rot: "Concluir", fn: () => {} }, secundario: { rot: "Ver a OS", fn: () => abrirOS(o.id) } }); };
-  if (acao === "iniciar") return busy(btn, async () => { const r = await rpc("iniciar_atendimento", { p_os: id });
-    toast(r?.pausou ? `Atendimento iniciado. ${osId(r.pausou)} foi pausada automaticamente.` : "Atendimento iniciado. Bom trabalho!"); recarregar(); if (isMob()) abrirOS(id); });
+  if (acao === "iniciar") return folhaIniciar(o);
+  if (acao === "material") return busy(btn, async () => { await rpc("pausar_atendimento", { p_os: id, p_motivo: "MATERIAL", p_detalhe: "" });
+    toast("Buscando material. Ao voltar, toque em “Voltei · continuar serviço”."); recarregar(); if (isMob()) abrirOS(id); });
   if (acao === "retomar") return busy(btn, async () => { const r = await rpc("retomar_atendimento", { p_os: id });
+    if (ehEtapa(o.pausa_motivo)) { toast(o.pausa_motivo === "DESLOCAMENTO" ? `Serviço iniciado. Deslocamento: ${fmtMin(r.minutos)}.` : `Serviço retomado. Tempo buscando material: ${fmtMin(r.minutos)}.`); recarregar(); if (isMob()) abrirOS(id); return; }
     const exc = o.pausa_motivo === "ALMOCO" ? r.minutos - (S.jornada?.almoco_max_min || 120) : 0;
     toast(exc > 0 ? `Retomado. O almoço passou ${fmtMin(exc)} do padrão de ${fmtMin(S.jornada?.almoco_max_min || 120)} e ficará registrado.` : `Atendimento retomado após ${fmtMin(r.minutos)} de pausa.${r.pausou ? ` ${osId(r.pausou)} foi pausada.` : ""}`, exc > 0);
     recarregar(); if (isMob()) abrirOS(id); });
@@ -938,10 +951,32 @@ function folhaFinalizar(o, fim) {
     },
   });
 }
+// Iniciar: o manutentor diz o que está fazendo agora (deslocamento e material contam como trabalho, mas não como serviço)
+function folhaIniciar(o) {
+  const OP = [["DESLOCAMENTO", "truck", "Estou indo até o local", "Conta como deslocamento até você tocar em “Cheguei”."],
+    ["MATERIAL", "box", "Vou buscar material no almoxarifado", "Conta como busca de material até você tocar em “Voltei”."],
+    ["", "tool", "Já estou no local: começar o serviço", "Começa direto a contar o tempo de serviço."]];
+  folha({
+    titulo: "Iniciar atendimento", sub: `${osId(o.id)} · o que você vai fazer agora?`,
+    corpo: `<div class="people" id="etapas">${OP.map(([k, i, t, d]) => `<button type="button" class="person" data-e="${k}" aria-checked="false"><span class="avatar" style="background:var(--surface-2);color:var(--ink-2)">${ic(i)}</span><span><b>${t}</b><small>${d}</small></span></button>`).join("")}</div>
+      <p class="muted" style="font-size:12.5px;margin-top:10px">Os horários são gravados sozinhos. Assim o tempo de serviço fica só com o serviço de fato, e o deslocamento e a busca de material ficam separados.</p><p class="err" id="erroI"></p>`,
+    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okI">${ic("play")}Iniciar</button>`,
+    aoAbrir: (el, fechar) => {
+      marcar($("#etapas", el), ".person");
+      $("#okI", el).onclick = (e) => {
+        const sel = $(".person[aria-checked=true]", el); if (!sel) return ($("#erroI", el).textContent = "Escolha uma opção.");
+        const etapa = sel.dataset.e || null;
+        busy(e.currentTarget, async () => { const r = await rpc("iniciar_atendimento", { p_os: o.id, p_etapa: etapa }); fechar();
+          const msg = etapa === "DESLOCAMENTO" ? "Deslocamento iniciado. Ao chegar, toque em “Cheguei · iniciar serviço”." : etapa === "MATERIAL" ? "Busca de material iniciada. Ao voltar, toque em “Voltei · continuar serviço”." : "Serviço iniciado. Bom trabalho!";
+          toast(r?.pausou ? `${msg} ${osId(r.pausou)} foi pausada automaticamente.` : msg); recarregar(); if (isMob()) abrirOS(o.id); });
+      };
+    },
+  });
+}
 function folhaPausa(o) {
   folha({
     titulo: "Pausar atendimento", sub: `${osId(o.id)} · o tempo da pausa não conta como execução`,
-    corpo: `<div class="people" id="motivos">${Object.entries(MOTIVOS).filter(([k]) => k !== "OUTRA_OS").map(([k, m]) =>
+    corpo: `<div class="people" id="motivos">${Object.entries(MOTIVOS).filter(([k]) => k !== "OUTRA_OS" && !ehEtapa(k)).map(([k, m]) =>
         `<button type="button" class="person" data-m="${k}" aria-checked="false"><span class="avatar" style="background:var(--surface-2);color:var(--ink-2)">${ic(m.i)}</span><span><b>${m.rot}</b>${m.lim ? `<small>alerta se passar de ${fmtMin(m.lim)}</small>` : ""}</span></button>`).join("")}</div>
       <label class="field" style="margin-top:12px"><span>Detalhe <em id="detOpc">(opcional)</em></span><input class="input" id="pDet" maxlength="120" placeholder="Ex.: disjuntor 3x40A pedido ao almoxarifado"></label>
       <div class="note" id="infoAlmoco" hidden></div>
@@ -1142,6 +1177,7 @@ async function carregarPainel() {
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
   const durP = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4;
   const pausaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim).reduce((s2, p) => s2 + durP(p), 0);
+  const etapaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim && ehEtapa(p.motivo)).reduce((s2, p) => s2 + durP(p), 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), volt = L.filter((r) => r.recusas > 0 || r.nao_resolvidos > 0);
   const h = (o) => (Date.now() - new Date(o.aberta_em)) / 36e5, emerg = A.filter((o) => o.prioridade === "EMERGENCIA").length, velhas = A.filter((o) => h(o) > 168).length;
   const An = rAnt.data || [], cAn = An.filter((r) => r.status === "CONCLUÍDA");
@@ -1191,15 +1227,16 @@ async function carregarPainel() {
   const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
   const eq = mnts.map((u) => { const at = T.filter((a) => a.manutentor_id === u.id), fin = at.filter((a) => a.finalizada_em), ex = fin.map((a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id));
     const av = fin.filter((a) => ["CONFIRMADO", "NAO_RESOLVIDO"].includes(a.resultado));
-    return { u, rec: at.length, fin: fin.length, horas: ex.reduce((s, x) => s + (x || 0), 0), exec: mediana(ex), resp: mediana(at.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
+    const des = PZ.filter((p) => p.manutentor_id === u.id && p.motivo === "DESLOCAMENTO").reduce((s2, p) => s2 + durP(p), 0), mat = PZ.filter((p) => p.manutentor_id === u.id && p.motivo === "MATERIAL").reduce((s2, p) => s2 + durP(p), 0);
+    return { u, rec: at.length, fin: fin.length, horas: ex.reduce((s, x) => s + (x || 0), 0) + fin.reduce((s, a) => s + etapaAt(a.id), 0), servico: ex.reduce((s, x) => s + (x || 0), 0), des, mat, exec: mediana(ex), resp: mediana(at.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
       retr: av.length ? pct(av.filter((a) => a.resultado === "NAO_RESOLVIDO").length, av.length) : null, recusas: at.filter((a) => a.resultado === "RECUSADO").length,
       maos: A.filter((o) => o.manutentor_id === u.id && ["DIRECIONADA", "EM ATENDIMENTO"].includes(o.status)).length, longos: ex.filter((x) => x > 720).length,
       mix: Object.keys(PRIO).map((k) => [k, fin.filter((a) => a.ordens_servico?.prioridade === k).length]),
-      parado: PZ.filter((p) => p.manutentor_id === u.id).reduce((s2, p) => s2 + durP(p), 0),
+      parado: PZ.filter((p) => p.manutentor_id === u.id && !ehEtapa(p.motivo)).reduce((s2, p) => s2 + durP(p), 0),
       media: media(ex), respMed: media(at.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
-      porMot: Object.keys(MOTIVOS).map((k) => [k, PZ.filter((p) => p.manutentor_id === u.id && p.motivo === k).reduce((s2, p) => s2 + durP(p), 0)]) }; });
-  const COR_M = { ALMOCO: "#A1A4A9", PECA: "#D9590B", EXPEDIENTE: "#5B6470", OUTRA_OS: "#7C3AED", OUTRO: "#C9A227" };
-  const pm = Object.keys(MOTIVOS).map((k) => { const g = PZ.filter((p) => p.motivo === k); return { k, n: g.length, m: g.reduce((s2, p) => s2 + durP(p), 0) }; });
+      porMot: Object.keys(MOTIVOS).filter((k) => !ehEtapa(k)).map((k) => [k, PZ.filter((p) => p.manutentor_id === u.id && p.motivo === k).reduce((s2, p) => s2 + durP(p), 0)]) }; });
+  const COR_M = { ALMOCO: "#A1A4A9", PECA: "#D9590B", EXPEDIENTE: "#5B6470", OUTRA_OS: "#7C3AED", OUTRO: "#C9A227", DESLOCAMENTO: "#2F6BD9", MATERIAL: "#E39A12" };
+  const pm = Object.keys(MOTIVOS).filter((k) => !ehEtapa(k)).map((k) => { const g = PZ.filter((p) => p.motivo === k); return { k, n: g.length, m: g.reduce((s2, p) => s2 + durP(p), 0) }; });
   $("#gPausas").innerHTML = PZ.length ? barras(pm.map((x) => ({ l: `${ic(MOTIVOS[x.k].i)} ${MOTIVOS[x.k].rot}`, v: x.m, txt: fmtMin(x.m), c: COR_M[x.k], e: `${x.n} pausa(s)` })), Math.max(1, ...pm.map((x) => x.m)))
     + `<p class="muted" style="font-size:12px;margin-top:12px">“Aguardando peça” alto indica falta de material no carro ou demora do almoxarifado.</p>` : `<div class="zero">Nenhuma pausa registrada no período.</div>`;
   const mF = Math.max(1, ...eq.map((e) => e.fin)), mP = Math.max(1, ...eq.map((e) => e.parado));
@@ -1212,12 +1249,12 @@ async function carregarPainel() {
   S.painel = { T, PZ, A, ini0, dias, pausaAt, durP };
   const eqMed = (f) => media(eq.map(f).filter((x) => x != null));
   const linhaT = (e) => `<tr data-u="${e.u.id}"><td data-l="Manutentor"><span class="who-cell">${av(e.u.id)}${esc(e.u.nome)}</span></td>
-    <td class="n" data-l="OS atendidas">${e.fin}</td><td class="n" data-l="Horas trabalhadas">${fmtHoras(e.horas)}</td><td class="n" data-l="Tempo médio">${fmtMin(e.media)}</td><td class="n" data-l="Resposta média">${fmtMin(e.respMed)}</td>
+    <td class="n" data-l="OS atendidas">${e.fin}</td><td class="n" data-l="Horas trabalhadas">${fmtHoras(e.horas)}</td><td class="n" data-l="Deslocamento">${fmtMin(e.des)}</td><td class="n" data-l="Material">${fmtMin(e.mat)}</td><td class="n" data-l="Tempo médio">${fmtMin(e.media)}</td><td class="n" data-l="Resposta média">${fmtMin(e.respMed)}</td>
     <td class="n" data-l="Retrabalho">${e.retr == null ? "—" : e.retr + "%"}</td><td class="n" data-l="Recusas">${e.recusas}</td><td class="n" data-l="Tempo parado">${fmtMin(e.parado)}</td><td class="n" data-l="Em mãos">${e.maos}${e.longos ? ` <span title="Atendimento com mais de 12 h">${ic("alert")}</span>` : ""}</td></tr>`;
-  $("#gTeam").innerHTML = `<div class="tbl"><table class="t team-t"><thead><tr><th>Manutentor</th><th class="n">OS atendidas</th><th class="n">Horas trabalhadas</th><th class="n">Tempo médio por OS</th>
+  $("#gTeam").innerHTML = `<div class="tbl"><table class="t team-t"><thead><tr><th>Manutentor</th><th class="n">OS atendidas</th><th class="n">Horas trabalhadas</th><th class="n">Deslocamento</th><th class="n">Material</th><th class="n">Tempo médio por OS</th>
     <th class="n">Resposta média</th><th class="n">Retrabalho</th><th class="n">Recusas</th><th class="n">Tempo parado</th><th class="n">Em mãos</th></tr></thead>
     <tbody>${eq.map(linhaT).join("")}</tbody>
-    <tfoot><tr><td data-l="">Média da equipe</td><td class="n">${Math.round(eqMed((e) => e.fin) || 0)}</td><td class="n">${fmtHoras(eqMed((e) => e.horas))}</td><td class="n">${fmtMin(eqMed((e) => e.media))}</td>
+    <tfoot><tr><td data-l="">Média da equipe</td><td class="n">${Math.round(eqMed((e) => e.fin) || 0)}</td><td class="n">${fmtHoras(eqMed((e) => e.horas))}</td><td class="n">${fmtMin(eqMed((e) => e.des))}</td><td class="n">${fmtMin(eqMed((e) => e.mat))}</td><td class="n">${fmtMin(eqMed((e) => e.media))}</td>
     <td class="n">${fmtMin(eqMed((e) => e.respMed))}</td><td class="n">${eqMed((e) => e.retr) == null ? "—" : Math.round(eqMed((e) => e.retr)) + "%"}</td><td class="n">${(eqMed((e) => e.recusas) || 0).toFixed(1).replace(".", ",")}</td>
     <td class="n">${fmtMin(eqMed((e) => e.parado))}</td><td class="n">—</td></tr></tfoot></table></div>
     <p class="muted" style="font-size:12px;margin-top:10px">Horas trabalhadas = tempo registrado entre Iniciar e Finalizar, menos as pausas. Não inclui deslocamento nem serviço feito sem OS.</p>`;
@@ -1261,13 +1298,13 @@ function folhaDesempenho(uid, eq) {
   const porP = Object.keys(PRIO).map((k) => { const g = fin.filter((a) => a.ordens_servico?.prioridade === k); return { l: PRIO[k].rot, c: PCOR[k], n: g.length, m: media(g.map(liq)) }; });
   const eqs = {}; fin.forEach((a) => { const k = a.ordens_servico?.equipamento || "Não informado"; (eqs[k] ??= []).push(liq(a)); });
   const oe = Object.entries(eqs).sort((a, b) => b[1].length - a[1].length).slice(0, 8);
-  const pz = Object.keys(MOTIVOS).map((k) => ({ k, m: P.PZ.filter((p) => p.manutentor_id === uid && p.motivo === k).reduce((s2, p) => s2 + P.durP(p), 0) })).filter((x) => x.m > 0);
+  const pz = Object.keys(MOTIVOS).filter((k) => !ehEtapa(k)).map((k) => ({ k, m: P.PZ.filter((p) => p.manutentor_id === uid && p.motivo === k).reduce((s2, p) => s2 + P.durP(p), 0) })).filter((x) => x.m > 0);
   const RES = { CONFIRMADO: ["ok", "Resolvido"], NAO_RESOLVIDO: ["bad", "Não resolvido"] };
   folha({
     titulo: `Desempenho · ${esc(u.nome)}`, sub: `Últimos ${P.dias} dias · atendimentos direcionados no período`, tam: "xl full",
     corpo: `<div class="kpis kpis-4">
         ${kpi("OS atendidas", e.fin, `${e.rec} recebidas · ${e.recusas} recusada(s) · ${cmp(e.fin, eqMed((x) => x.fin), false, (v) => Math.round(v))}`)}
-        ${kpi("Horas trabalhadas", fmtHoras(e.horas), `líquidas, sem pausas · ${cmp(e.horas, eqMed((x) => x.horas), false, fmtHoras)}`)}
+        ${kpi("Horas trabalhadas", fmtHoras(e.horas), `serviço + deslocamento + material · ${cmp(e.horas, eqMed((x) => x.horas), false, fmtHoras)}`)}
         ${kpi("Tempo médio por OS", fmtMin(e.media), `mediana ${fmtMin(e.exec)} · ${cmp(e.media, eqMed((x) => x.media))}`)}
         ${kpi("Resposta média", fmtMin(e.respMed), `do direcionamento ao início · ${cmp(e.respMed, eqMed((x) => x.respMed))}`)}
         ${kpi("Retrabalho", e.retr == null ? "—" : e.retr + "%", `técnico informou não resolvido`)}
@@ -1280,6 +1317,7 @@ function folhaDesempenho(uid, eq) {
           <div class="legend" style="grid-template-columns:repeat(2,max-content);gap:18px"><div style="grid-template-columns:10px auto"><i style="background:var(--ink-2)"></i><span>OS finalizadas</span></div><div style="grid-template-columns:10px auto"><i style="background:#9EA2A8"></i><span>Horas trabalhadas</span></div></div></section>
         <section class="card"><h3>Tempo médio por classificação</h3><p class="muted">Execução líquida média.</p>${barras(porP.map((x) => ({ l: x.l, v: x.m || 0, txt: fmtMin(x.m), c: x.c, e: `${x.n} OS` })), Math.max(1, ...porP.map((x) => x.m || 0)))}</section>
         <section class="card"><h3>Por local ou equipamento</h3><p class="muted">OS atendidas · tempo médio.</p>${oe.length ? barras(oe.map(([k, v]) => ({ l: esc(k), v: v.length, e: fmtMin(media(v)) })), oe[0][1].length) : `<div class="zero">Sem OS no período.</div>`}</section>
+        <section class="card"><h3>Onde o tempo foi gasto</h3><p class="muted">Atendimentos do período.</p>${barras([["Serviço (execução)", e.servico, "#1E8E4E"], ["Deslocamento", e.des, "#2F6BD9"], ["Buscando material", e.mat, "#E39A12"], ["Pausas", e.parado, "#A1A4A9"]].map(([l, v, c]) => ({ l, v, txt: fmtMin(v), c })), Math.max(1, e.servico, e.des, e.mat, e.parado))}</section>
         <section class="card"><h3>Pausas</h3><p class="muted">Tempo parado por motivo.</p>${pz.length ? barras(pz.map((x) => ({ l: MOTIVOS[x.k].rot, v: x.m, txt: fmtMin(x.m) })), Math.max(...pz.map((x) => x.m))) : `<div class="zero">Nenhuma pausa no período.</div>`}</section>
         <section class="card"><h3>Qualidade</h3><p class="muted">Resultado confirmado pelo técnico.</p>${barras([
           { l: "Resolvido", v: fin.filter((a) => a.resultado === "CONFIRMADO").length, c: "var(--s-concluida)" },
@@ -1443,23 +1481,25 @@ async function gerarRelatorio() {
   if (mnt) { const osDoMnt = new Set(T.filter((a) => a.manutentor_id === mnt).map((a) => a.os_id)); L = L.filter((r) => r.manutentor_id === mnt || osDoMnt.has(r.id)); T = T.filter((a) => a.manutentor_id === mnt); }
   const pausaAt = (id) => rP.data.filter((p) => p.atendimento_id === id && p.fim).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
   const liq = (a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id);
+  const etapaAt = (id, m) => rP.data.filter((p) => p.atendimento_id === id && p.fim && (m ? p.motivo === m : ehEtapa(p.motivo))).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
   const finT = T.filter((a) => dentro(a.finalizada_em)), iniT = T.filter((a) => dentro(a.iniciada_em));
   const devol = T.filter((a) => dentro(a.avaliado_em) && ["RECUSADO", "NAO_RESOLVIDO", "DEVOLVIDO"].includes(a.resultado));
   const idsT = new Set(T.map((a) => a.id)), pz = rP.data.filter((p) => idsT.has(p.atendimento_id) && dentro(p.inicio));
-  const parado = pz.reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
+  const parado = pz.filter((p) => !ehEtapa(p.motivo)).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), pend = L.filter((r) => r.status !== "CONCLUÍDA");
   const semInicio = pend.filter((r) => ["ABERTA", "DIRECIONADA", "PENDENTE DE ATENDIMENTO"].includes(r.status));
   const R = {
     rotPer, ini0, fim0, filtros: [["Período", `${rotPer} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Granja", nuc ? nomeN(nuc) : "Todas"], ["Classificação", prio ? PRIO[prio].rot : "Todas"]],
     k: { abertas: L.length, concl: concl.length, pct: pct(concl.length, L.length), pend: pend.length, semInicio: semInicio.length, andamento: pend.length - semInicio.length,
       devol: devol.length, recusas: devol.filter((a) => a.resultado === "RECUSADO").length, naoRes: devol.filter((a) => a.resultado === "NAO_RESOLVIDO").length, admin: devol.filter((a) => a.resultado === "DEVOLVIDO").length,
-      horas: finT.reduce((s2, a) => s2 + liq(a), 0), atendidas: finT.length, medio: media(finT.map(liq)), resposta: media(iniT.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
+      horas: finT.reduce((s2, a) => s2 + liq(a) + etapaAt(a.id), 0), servico: finT.reduce((s2, a) => s2 + liq(a), 0), desloc: finT.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), material: finT.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0), atendidas: finT.length, medio: media(finT.map(liq)), resposta: media(iniT.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
       lead: media(concl.map((r) => r.min_lead_total)), parado },
   };
   const mntsR = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor") && (!mnt || u.id === mnt)).sort((a, b) => a.nome.localeCompare(b.nome));
   R.porMnt = mntsR.map((u) => { const f = finT.filter((a) => a.manutentor_id === u.id), dv = devol.filter((a) => a.manutentor_id === u.id), ii = iniT.filter((a) => a.manutentor_id === u.id);
-    const pp = pz.filter((p) => p.manutentor_id === u.id).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
-    return [u.nome, f.length, f.reduce((s2, a) => s2 + liq(a), 0), media(f.map(liq)), media(ii.map((a) => minEntre(a.iniciada_em, a.direcionada_em))), dv.filter((a) => a.resultado === "RECUSADO").length, dv.filter((a) => a.resultado === "NAO_RESOLVIDO").length, pp]; });
+    const pp = pz.filter((p) => p.manutentor_id === u.id && !ehEtapa(p.motivo)).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
+    return [u.nome, f.length, f.reduce((s2, a) => s2 + liq(a) + etapaAt(a.id), 0), media(f.map(liq)), media(ii.map((a) => minEntre(a.iniciada_em, a.direcionada_em))), dv.filter((a) => a.resultado === "RECUSADO").length, dv.filter((a) => a.resultado === "NAO_RESOLVIDO").length, pp,
+      f.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), f.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0)]; });
   const gIds = [...new Set(L.map((r) => r.nucleo_id))].sort((a, b) => nomeN(a).localeCompare(nomeN(b)));
   R.porGranja = gIds.map((g) => { const l = L.filter((r) => r.nucleo_id === g), c = l.filter((r) => r.status === "CONCLUÍDA").length, f = finT.filter((a) => a.ordens_servico?.nucleo_id === g);
     return [nomeN(g), l.length, c, pct(c, l.length), l.length - c, media(f.map(liq))]; });
@@ -1501,7 +1541,8 @@ function desenharRelatorio(R) {
         ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas${k.admin ? ` · ${k.admin} pelo admin` : ""}`, k.devol > 0)}</div></section>
       <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
         ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
-        ${met("Tempo médio de atendimento", fmtMin(k.medio), "execução líquida por OS")}
+        ${met("Tempo médio de atendimento", fmtMin(k.medio), "serviço de fato por OS (sem deslocamento, material e pausas)")}
+        ${met("Serviço · deslocamento · material", `${fmtHoras(k.servico)} · ${fmtHoras(k.desloc)} · ${fmtHoras(k.material)}`, "como as horas trabalhadas se dividem")}
         ${met("Resposta média", fmtMin(k.resposta), "do direcionamento ao início")}
         ${met("Lead médio", fmtMin(k.lead), "da abertura à confirmação")}</div></section>
     </div>
@@ -1510,9 +1551,9 @@ function desenharRelatorio(R) {
       <section><h4>Finalização</h4>${medidor(k.pct, { rot: `${k.concl} de ${k.abertas} OS`, cor: k.pct >= 80 ? "#1E8E4E" : k.pct >= 60 ? "#E8A317" : "#DF2331" })}</section>
       <section><h4>Horas trabalhadas por manutentor</h4>${R.porMnt.length ? barras(R.porMnt.map((l) => ({ l: esc(l[0]), v: l[2], txt: fmtHoras(l[2]), c: "#DF2331" })), Math.max(1, ...R.porMnt.map((l) => l[2]))) : `<div class="zero">Sem atendimentos.</div>`}</section>
     </div>
-    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
-      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
-      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
+    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
+      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
+      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
     <div class="rel-2">
       ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
         R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]),
@@ -1589,8 +1630,8 @@ async function exportarPDF() {
     y = doc.lastAutoTable.finalY + 9;
   };
   const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
-  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas", "Tempo médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
-    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(7));
+  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas", "Deslocamento", "Material", "Tempo médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
+    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(9));
   secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
   secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
   secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
@@ -1618,8 +1659,8 @@ async function exportarExcel() {
     ["Tempo médio de atendimento (min)", mi(k.medio), "execução líquida"], ["Resposta média (min)", mi(k.resposta), "direcionamento → início"],
     ["Lead médio (min)", mi(k.lead), "abertura → confirmação"], ["Tempo parado (h)", h(k.parado), "pausas"]], [34, 22, 44]);
   wb.Sheets.Resumo["B" + (R.filtros.length + 9)].z = "0%";
-  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Tempo médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
-    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 17, 20, 10, 14, 17]);
+  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Deslocamento (h)", "Material (h)", "Tempo médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
+    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 16, 13, 17, 20, 10, 14, 17]);
   aba("Por granja", [["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio (min)"], ...R.porGranja.map((l) => [l[0], l[1], l[2], l[3] / 100, l[4], mi(l[5])])], [18, 10, 12, 14, 14, 18]);
   aba("Por classificação", [["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar (min)", "Lead médio (min)"], ...R.porPrio.map((l) => [l[0], l[1], l[2], l[3] / 100, mi(l[4]), mi(l[5])])], [16, 10, 12, 14, 18, 17]);
   aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
@@ -1759,7 +1800,7 @@ async function jornadaBuscar() {
   const { data, error } = await q.order("inicio", { ascending: false }).range(0, 19999);
   if (tok !== S.tok) return;
   if (error) return toast(errMsg(error), true);
-  S.ctlJor = { linhas: data, rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"]] };
+  S.ctlJor = { linhas: data.filter((p) => !ehEtapa(p.motivo)), rot, ini0, fim0, filtros: [["Período", `${rot} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"]] };
   jornadaDesenhar();
 }
 function resumoDias(L) {
