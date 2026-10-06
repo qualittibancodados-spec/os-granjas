@@ -989,3 +989,6 @@ table.rt .linkish { font-size: 13px; }
 .st.etapa { --sc: #2F6BD9; color: #2F6BD9; background: color-mix(in srgb, #2F6BD9 10%, white); }
 .st.etapa.longa { color: var(--brand-600); background: var(--brand-50); }
 .os-actions .btn { flex: 1 1 0; min-width: 0; }
+/* OS preventiva */
+.tag-prev { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; color: #1E8E4E; background: #EAF7EF; border-radius: 6px; padding: 1px 7px; }
+.tag-prev svg.i { width: 12px; height: 12px; }

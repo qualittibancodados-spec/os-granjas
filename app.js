@@ -55,6 +55,7 @@ const P = {
   silo: '<path d="M6 21V8a6 6 0 0 1 12 0v13M4 21h16M6 12h12M6 16h12"/>',
   roof: '<path d="M3 11 12 4l9 7M5 10v10h14V10M9 20v-6h6v6"/>',
   gate: '<path d="M3 21V5M21 21V5M3 9h18M3 15h18M8 9v6M13 9v6M18 9v6"/>',
+  shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
   truck: '<path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2M15 18H9M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>',
   pause: '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>',
   coffee: '<path d="M10 2v2M14 2v2M6 2v2M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/>',
@@ -166,6 +167,9 @@ async function todas(q, limite = 200000) {
   }
   return { data: tudo, error: null };
 }
+// OS preventivas: ids (são poucas) para separar corretiva × preventiva no painel e no relatório
+async function idsPreventivas() { const { data } = await todas(sb.from("ordens_servico").select("id").eq("tipo", "PREVENTIVA").order("id")); return new Set((data || []).map((x) => x.id)); }
+const filtroTipo = (tipo, prev, id) => !tipo || (tipo === "PREVENTIVA" ? prev.has(id) : !prev.has(id));
 async function busy(btn, fn) { btn.disabled = true; try { await fn(); } catch (e) { toast(errMsg(e), true); } finally { btn.disabled = false; } }
 
 /* ---------------- login ---------------- */
@@ -384,7 +388,7 @@ function ir(id) {
 async function pendencias() {
   const itens = [], q = () => sb.from("ordens_servico").select(CAMPOS);
   const add = (o, tipo, titulo, texto, urg = false) => itens.push({ os: o?.id, tipo, titulo, texto, urg: urg || o?.prioridade === "EMERGENCIA", quando: o?.aberta_em, o });
-  if (tem("tecnico")) {
+  if (tem("tecnico") || tem("gestor")) {
     const { data } = await q().eq("solicitante_id", S.eu.id).eq("status", "AGUARDANDO CONFIRMAÇÃO").range(0, 199);
     data.forEach((o) => add(o, "confirmar", `Confirme o serviço · ${osId(o.id)}`, `${o.descricao} — ${nomeU(o.manutentor_id)} finalizou.`));
   }
@@ -588,7 +592,7 @@ function acoesRapidas(o) {
     if (o.status === "EM ATENDIMENTO" && o.pausada_em) return `<div class="os-actions">${b("retomar", ehEtapa(o.pausa_motivo) ? MOTIVOS[o.pausa_motivo].volta : "Retomar atendimento", "btn-primary", "play")}</div>`;
     if (o.status === "EM ATENDIMENTO") return `<div class="os-actions">${b("material", "Material", "", "box")}${b("pausar", "Pausar", "", "pause")}${b("finalizar", "Finalizar", "btn-primary", "flag")}</div>`;
   }
-  if (tem("tecnico") && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
+  if ((tem("tecnico") || tem("gestor")) && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
     return `<div class="os-actions">${b("naoresolvido", "Não resolvido", "btn-danger")}${b("confirmar", "Resolvido", "btn-primary", "check")}</div>`;
   if (tem("gestor") && ["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(o.status))
     return `<div class="os-actions">${b("direcionar", "Classificar e direcionar", "btn-primary", "send")}</div>`;
@@ -599,14 +603,14 @@ function card(o, { acoes = false } = {}) {
   const emerg = o.prioridade === "EMERGENCIA" && o.status !== "CONCLUÍDA";
   const resp = o.manutentor_id && o.status !== "ABERTA" ? o.manutentor_id : o.solicitante_id;
   return `<article class="os${emerg ? " emerg" : ""}${S.sel === o.id ? " sel" : ""}" style="--pc:${PCOR[o.prioridade] || "var(--line)"}" data-os="${o.id}" tabindex="0">
-    <div class="os-top"><span class="os-id">${osId(o.id)}</span>${sev(o.prioridade)}<span class="os-age${late ? " late" : ""}" title="Aberta em ${fmtDH(o.aberta_em)}">${idade(o.aberta_em)}</span></div>
+    <div class="os-top"><span class="os-id">${osId(o.id)}</span>${sev(o.prioridade)}${o.tipo === "PREVENTIVA" ? `<span class="tag-prev">${ic("shield")}Preventiva</span>` : ""}<span class="os-age${late ? " late" : ""}" title="Aberta em ${fmtDH(o.aberta_em)}">${idade(o.aberta_em)}</span></div>
     <div class="os-title">${esc(o.descricao)}</div>
     <div class="os-meta"><span>${ic("pin")}${esc(nomeN(o.nucleo_id))} · ${localCurto(o.galpoes)}</span>${o.equipamento ? `<span>${ic(eqIcon(o.equipamento))}${esc(o.equipamento)}</span>` : ""}</div>
     <div class="os-foot">${stTag(o.status, o)}<span class="who">${av(resp)}${esc(nomeU(resp).split(" ")[0])}</span></div>
     ${acoes ? acoesRapidas(o) : ""}
   </article>`;
 }
-const CAMPOS = "id,status,nucleo_id,galpoes,equipamento,descricao,aberta_em,solicitante_id,manutentor_id,prioridade,pausada_em,pausa_motivo";
+const CAMPOS = "id,status,nucleo_id,galpoes,equipamento,descricao,aberta_em,solicitante_id,manutentor_id,prioridade,pausada_em,pausa_motivo,tipo";
 function ligarLista(el) {
   el.addEventListener("click", (e) => {
     const a = e.target.closest("[data-acao]");
@@ -647,6 +651,9 @@ async function viewInicio() {
       ${stat(data.filter((o) => o.prioridade === "EMERGENCIA").length, "Emergências abertas", "var(--p-EMERGENCIA)", "emergencia", data.some((o) => o.prioridade === "EMERGENCIA"))}
       ${stat(data.filter((o) => o.status === "AGUARDANDO CONFIRMAÇÃO").length, "Esperando o técnico", "var(--s-aguardando)", "aguardando")}
       ${stat(velhas.length, "Abertas há +3 dias", "var(--s-pendente)", "abertas", velhas.length > 0)}</div>`;
+    const conferir = data.filter((o) => o.status === "AGUARDANDO CONFIRMAÇÃO" && o.solicitante_id === S.eu.id);
+    html += `<button class="cta-nova" id="ctaPrev"><span class="ic">${ic("shield")}</span><span><b>Abrir OS preventiva</b><span>Aproveite quando a equipe estiver com tempo livre</span></span><span class="go">${ic("right")}</span></button>`;
+    if (conferir.length) html += secao("Preventivas para conferir", conferir, { acoes: true });
     html += secao("Para direcionar", dir, { acoes: true, vazio: "Tudo direcionado. Nenhuma OS esperando." });
     if (emerg.length) html += secao("Emergências em andamento", emerg);
     if (velhas.length) html += secao("Paradas há mais de 3 dias", velhas.filter((o) => !dir.includes(o)).slice(0, 10));
@@ -654,7 +661,7 @@ async function viewInicio() {
   if (tem("manutentor")) {
     const { data } = await q().eq("manutentor_id", S.eu.id).in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).order("prioridade_ordem", { ascending: false }).order("id").range(0, 199);
     html += secao("Em atendimento agora", data.filter((o) => o.status === "EM ATENDIMENTO"), { acoes: true, vazio: "Nenhum atendimento em andamento." });
-    html += secao("Sua fila", data.filter((o) => o.status === "DIRECIONADA"), { acoes: true, vazio: "Sua fila está vazia. Bom trabalho!" });
+    html += secao("Sua fila", data.filter((o) => o.status === "DIRECIONADA").sort((a, b) => (a.tipo === "PREVENTIVA") - (b.tipo === "PREVENTIVA")), { acoes: true, vazio: "Sua fila está vazia. Bom trabalho!" });
   }
   if (tok !== S.tok) return;
   if (!S.avisos) await atualizarBadges();
@@ -662,7 +669,8 @@ async function viewInicio() {
   if (pend.length) html = html.replace('</h2></div>', `</h2></div><button class="alerta-emerg" id="verAvisos">${ic("alert")}<span><b>${pend.length} ${pend.length > 1 ? "avisos urgentes" : "aviso urgente"}</b><small>${esc(pend[0].titulo)}</small></span>${ic("right")}</button>`);
   $("#pl").innerHTML = html;
   $("#verAvisos")?.addEventListener("click", () => folhaAvisos());
-  $("#ctaNova")?.addEventListener("click", novaOS);
+  $("#ctaNova")?.addEventListener("click", () => novaOS());
+  $("#ctaPrev")?.addEventListener("click", () => novaOS(true));
   $("#pl").addEventListener("click", (e) => {
     const s = e.target.closest("[data-grupo]"); if (s) { S.lista.grupo = s.dataset.grupo; ir("ordens"); }
     const l = e.target.closest("[data-ir]"); if (l) { e.preventDefault(); ir(l.dataset.ir); }
@@ -679,6 +687,7 @@ const GRUPOS = () => [
   ...(podeVerTudo() ? [["emergencia", "Emergências", "alert", (q) => q.in("status", ABERTOS).eq("prioridade", "EMERGENCIA"), (o) => ABERTOS.includes(o.status) && o.prioridade === "EMERGENCIA"]] : []),
   ["atendimento", "Em atendimento", "tool", (q) => q.in("status", ["DIRECIONADA", "EM ATENDIMENTO"]), (o) => ["DIRECIONADA", "EM ATENDIMENTO"].includes(o.status)],
   ["aguardando", "Aguardando técnico", "clock", (q) => q.eq("status", "AGUARDANDO CONFIRMAÇÃO"), (o) => o.status === "AGUARDANDO CONFIRMAÇÃO"],
+  ...(podeVerTudo() ? [["preventivas", "Preventivas", "shield", (q) => q.eq("tipo", "PREVENTIVA").in("status", ABERTOS), (o) => o.tipo === "PREVENTIVA" && ABERTOS.includes(o.status)]] : []),
   ["concluidas", "Concluídas", "checkc", (q) => q.eq("status", "CONCLUÍDA"), (o) => o.status === "CONCLUÍDA"],
   ["todas", "Todas", "list", (q) => q, () => true],
 ];
@@ -794,7 +803,7 @@ function proximoPasso(o) {
   if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "EM ATENDIMENTO")
     return box("var(--s-atendimento)", "flag", `Executando o serviço · atendimento iniciado há ${idade(o.iniciada_em)}`, "Precisa ir ao almoxarifado? Toque em Material. Vai almoçar ou parar? Pause. Ao terminar, finalize descrevendo o que foi feito.",
       b("material", "Material", "", "box") + b("pausar", "Pausar", "", "pause") + b("finalizar", "Finalizar atendimento", "btn-primary", "flag"));
-  if (tem("tecnico") && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
+  if ((tem("tecnico") || tem("gestor")) && o.solicitante_id === S.eu.id && o.status === "AGUARDANDO CONFIRMAÇÃO")
     return box("var(--s-aguardando)", "checkc", "O manutentor finalizou", "Confira no local e confirme se o serviço foi resolvido.",
       b("naoresolvido", "Não resolvido", "btn-danger") + b("confirmar", "Confirmar: resolvido", "btn-primary", "check"));
   const info = {
@@ -1022,16 +1031,16 @@ function folhaClassificar(o) {
 }
 
 /* ---------------- Nova OS em 3 passos ---------------- */
-function novaOS() {
-  const D = { nuc: null, toda: false, av: new Set(), eq: "", desc: "" };
-  let passo = 1;
-  const f = folha({ titulo: "Nova ordem de serviço", sub: "Leva menos de um minuto", tam: "lg full", corpo: "", rodape: `<button class="btn" id="wVolta">Cancelar</button><button class="btn btn-primary" id="wSegue">Continuar</button>` });
+function novaOS(prev = false) {
+  const D = { nuc: null, toda: false, av: new Set(), eq: "", desc: "", mnt: "" };
+  let passo = 1, carga = null;
+  const f = folha({ titulo: prev ? "Nova OS preventiva" : "Nova ordem de serviço", sub: prev ? "Manutenção programada, sem problema aberto" : "Leva menos de um minuto", tam: "lg full", corpo: "", rodape: `<button class="btn" id="wVolta">Cancelar</button><button class="btn btn-primary" id="wSegue">Continuar</button>` });
   const el = f.el, corpo = $(".sheet-b", el);
   $(".sheet-h", el).insertAdjacentHTML("afterend", `<div class="wiz-prog" id="prog"></div>`);
   function render() {
     $("#prog", el).innerHTML = ["Onde", "O quê", "Revisar"].map((r, i) => `<div class="${i < passo ? "on" : ""}"><i></i>${i + 1}. ${r}</div>`).join("");
     $("#wVolta", el).textContent = passo === 1 ? "Cancelar" : "Voltar";
-    $("#wSegue", el).innerHTML = passo === 3 ? `${ic("send")}Abrir OS` : "Continuar";
+    $("#wSegue", el).innerHTML = passo === 3 ? `${ic(prev ? "shield" : "send")}${prev ? "Abrir preventiva" : "Abrir OS"}` : "Continuar";
     $("#wSegue", el).className = `btn ${passo === 3 ? "btn-brand" : "btn-primary"}`;
     if (passo === 1) {
       const n = S.nucleoPorId[D.nuc];
@@ -1048,18 +1057,24 @@ function novaOS() {
       corpo.innerHTML = `<div class="label">Local ou equipamento</div>
         <div class="equips" id="eqs">${EQUIP.map(([n, i]) => `<button type="button" class="equip" data-e="${esc(n)}" aria-pressed="${n === D.eq}">${ic(i)}${esc(n)}</button>`).join("")}</div>
         <label class="field" style="margin-top:10px"><span>Outro <em>(se não estiver na lista)</em></span><input class="input" id="eqOutro" maxlength="80" placeholder="Ex.: Balança do silo" value="${EQUIP.some(([n]) => n === D.eq) ? "" : esc(D.eq)}"></label>
-        <label class="field"><span>O que precisa ser feito</span><textarea class="input" id="desc" maxlength="2000" placeholder="Ex.: comedouro da linha 2 não desce ração no fundo do aviário. Se for urgente, explique o motivo.">${esc(D.desc)}</textarea></label>
+        <label class="field"><span>O que precisa ser feito</span><textarea class="input" id="desc" maxlength="2000" placeholder="${prev ? "Ex.: limpeza e revisão dos exaustores; verificar correias e lubrificar." : "Ex.: comedouro da linha 2 não desce ração no fundo do aviário. Se for urgente, explique o motivo."}">${esc(D.desc)}</textarea></label>
         <p class="err" id="erroW"></p>`;
       $("#eqs", el).onclick = (e) => { const b = e.target.closest("[data-e]"); if (!b) return; D.eq = b.dataset.e; $("#eqOutro", el).value = "";
         $$("#eqs .equip", el).forEach((x) => x.setAttribute("aria-pressed", x === b)); $("#desc", el).focus(); };
       $("#eqOutro", el).oninput = (e) => { D.eq = e.target.value; $$("#eqs .equip", el).forEach((x) => x.setAttribute("aria-pressed", "false")); };
       $("#desc", el).oninput = (e) => (D.desc = e.target.value);
     } else {
-      corpo.innerHTML = `<p class="muted" style="margin-bottom:12px">Confira antes de enviar. O gestor de manutenção vai classificar e direcionar.</p>
+      if (prev && !carga) { carga = {}; sb.from("ordens_servico").select("manutentor_id").in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).then(({ data }) => { (data || []).forEach((x) => (carga[x.manutentor_id] = (carga[x.manutentor_id] || 0) + 1)); if (passo === 3) render(); }); }
+      const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor") && u.ativo && !u.excluido_em).sort((a, b) => (carga?.[a.id] || 0) - (carga?.[b.id] || 0) || a.nome.localeCompare(b.nome));
+      corpo.innerHTML = `${prev ? `<div class="note" style="margin-bottom:12px"><b>Preventiva:</b> entra na fila do manutentor <b>depois das corretivas</b> e, ao ser finalizada, <b>volta para você conferir</b>.</div>
+        <div class="label">Direcionar para <span class="muted" style="font-weight:400">— opcional; quem está com menos OS aparece primeiro</span></div>
+        <div class="people" id="pMnt"><button type="button" class="person" data-u="" aria-checked="${!D.mnt}"><span class="avatar" style="background:var(--surface-2);color:var(--ink-2)">${ic("clock")}</span><span><b>Direcionar depois</b><small>Fica em “A direcionar”</small></span></button>
+        ${mnts.map((u) => `<button type="button" class="person" data-u="${u.id}" aria-checked="${D.mnt === u.id}">${av(u.id)}<span><b>${esc(u.nome)}</b><small>${carga ? `${carga[u.id] || 0} OS em mãos` : "…"}</small></span></button>`).join("")}</div>` : `<p class="muted" style="margin-bottom:12px">Confira antes de enviar. O gestor de manutenção vai classificar e direcionar.</p>`}
         <dl class="review"><div><dt>Granja</dt><dd>${esc(nomeN(D.nuc))}</dd></div><div><dt>Local</dt><dd>${D.toda ? "Toda a granja" : local([...D.av])}</dd></div>
         <div><dt>Equipamento</dt><dd>${esc(D.eq)}</dd></div><div><dt>O que precisa</dt><dd>${esc(D.desc)}</dd></div></dl>
         <p style="margin-top:10px"><button class="linkish" id="editar">Corrigir alguma coisa</button></p><p class="err" id="erroW"></p>`;
       $("#editar", el).onclick = () => { passo = 1; render(); };
+      $("#pMnt", el)?.addEventListener("click", (e) => { const b = e.target.closest("[data-u]"); if (!b) return; D.mnt = b.dataset.u; $$("#pMnt .person", el).forEach((x) => x.setAttribute("aria-checked", x === b)); });
     }
     corpo.scrollTop = 0;
   }
@@ -1070,11 +1085,11 @@ function novaOS() {
     if (passo === 2) { if (D.eq.trim().length < 3) return err("Escolha ou escreva o local/equipamento."); if (D.desc.trim().length < 3) return err("Descreva o que precisa ser feito."); }
     if (passo < 3) { passo++; return render(); }
     busy(e.currentTarget, async () => {
-      const id = await rpc("abrir_os", { p_nucleo_id: D.nuc, p_galpoes: D.toda ? [] : [...D.av], p_equipamento: D.eq.trim(), p_descricao: D.desc.trim() });
+      const id = await rpc("abrir_os", { p_nucleo_id: D.nuc, p_galpoes: D.toda ? [] : [...D.av], p_equipamento: D.eq.trim(), p_descricao: D.desc.trim(), ...(prev ? { p_tipo: "PREVENTIVA", p_manutentor: D.mnt || null } : {}) });
       f.fechar(); recarregar();
-      sucesso({ titulo: `${osId(id)} aberta com sucesso`, texto: "O gestor de manutenção vai classificar e direcionar. Você acompanha tudo em Minhas OS.",
+      sucesso({ titulo: `${osId(id)} ${prev ? "preventiva " : ""}aberta com sucesso`, texto: prev ? (D.mnt ? `Direcionada para ${esc(nomeU(D.mnt))}. Entra na fila depois das corretivas e volta para você conferir.` : "Ficou em “A direcionar”. Direcione quando alguém estiver livre.") : "O gestor de manutenção vai classificar e direcionar. Você acompanha tudo em Minhas OS.",
         linhas: [["Granja", esc(nomeN(D.nuc))], ["Local", D.toda ? "Toda a granja" : local([...D.av])], ["Equipamento", esc(D.eq)]],
-        primario: { rot: "Abrir outra OS", fn: novaOS }, secundario: { rot: "Ver a OS", fn: () => abrirOS(id) } });
+        primario: { rot: prev ? "Abrir outra preventiva" : "Abrir outra OS", fn: () => novaOS(prev) }, secundario: { rot: "Ver a OS", fn: () => abrirOS(id) } });
     });
   };
   render();
@@ -1140,6 +1155,7 @@ async function viewPainel() {
   $("#view").innerHTML = `<div class="content">
     <div class="dash-bar">
       <select class="input" id="pPer"><option value="7">Últimos 7 dias</option><option value="30" selected>Últimos 30 dias</option><option value="90">Últimos 90 dias</option></select>
+      <select class="input" id="pTipo"><option value="">Corretivas e preventivas</option><option value="CORRETIVA">Só corretivas</option><option value="PREVENTIVA">Só preventivas</option></select>
       <select class="input" id="pNuc"><option value="">Todas as granjas</option>${S.nucleos.map((n) => `<option value="${n.id}">${esc(n.nome)}</option>`).join("")}</select>
     </div>
     <div class="seg" id="pSeg">${[["geral", "Visão geral"], ["prio", "Classificação"], ["equipe", "Equipe"], ["locais", "Granjas e equipamentos"], ["mat", "Materiais"]]
@@ -1169,7 +1185,7 @@ async function viewPainel() {
     <div data-v="mat" hidden><section class="card"><h3>${ic("box")} Material do estoque dos carros</h3><p class="muted">Somado pelo código. Material do almoxarifado não entra aqui.</p><div id="gMat"></div></section></div>
   </div>`;
   $("#pSeg").onclick = (e) => { const b = e.target.closest("[data-v]"); if (!b) return; $$("#pSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); $$("#view [data-v]:not(button)").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v)); };
-  $("#pPer").onchange = $("#pNuc").onchange = carregarPainel;
+  $("#pPer").onchange = $("#pNuc").onchange = $("#pTipo").onchange = carregarPainel;
   carregarPainel();
 }
 async function carregarPainel() {
@@ -1184,14 +1200,15 @@ async function carregarPainel() {
   if (nuc) qAnt = qAnt.eq("nucleo_id", nuc);
   const [rL, rA, rT, rP, rAnt] = await Promise.all([todas(qL), todas(qA), todas(qT), todas(qP), todas(qAnt)]);
   if (tok !== S.tok) return;
-  const L = rL.data, A = rA.data, T = rT.data.filter((a) => !nuc || a.ordens_servico?.nucleo_id === nuc);
+  const tipo = $("#pTipo").value, prev = tipo ? await idsPreventivas() : new Set(); if (tok !== S.tok) return;
+  const L = rL.data.filter((r) => filtroTipo(tipo, prev, r.id)), A = rA.data.filter((o) => filtroTipo(tipo, prev, o.id)), T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && filtroTipo(tipo, prev, a.os_id));
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
   const durP = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4;
   const pausaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim).reduce((s2, p) => s2 + durP(p), 0);
   const etapaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim && ehEtapa(p.motivo)).reduce((s2, p) => s2 + durP(p), 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), volt = L.filter((r) => r.recusas > 0 || r.nao_resolvidos > 0);
   const h = (o) => (Date.now() - new Date(o.aberta_em)) / 36e5, emerg = A.filter((o) => o.prioridade === "EMERGENCIA").length, velhas = A.filter((o) => h(o) > 168).length;
-  const An = rAnt.data || [], cAn = An.filter((r) => r.status === "CONCLUÍDA");
+  const An = (rAnt.data || []).filter((r) => filtroTipo(tipo, prev, r.id)), cAn = An.filter((r) => r.status === "CONCLUÍDA");
   const kpi = (i, cor, v, l, s2, d = "", hot = false) => `<div class="kpi${hot ? " hot" : ""}"><div class="kpi-h"><span class="kpi-ic" style="--kc:${cor}">${ic(i)}</span><small>${l}</small></div><b>${v}</b><span class="kpi-s">${s2}</span>${d}</div>`;
   const leadA = mediana(concl.map((r) => r.min_lead_total)), leadB = mediana(cAn.map((r) => r.min_lead_total));
   const comA = mediana(L.map((r) => r.min_ate_inicio)), comB = mediana(An.map((r) => r.min_ate_inicio));
@@ -1460,6 +1477,7 @@ async function viewRelatorios() {
         <label class="field" id="rAteL" hidden><span>Até</span><input type="date" class="input" id="rAte" value="${hojeISO()}"></label>
         <label class="field"><span>Manutentor</span><select class="input" id="rMnt"><option value="">Todos</option>${mnts.map((u) => `<option value="${u.id}">${esc(u.nome)}</option>`).join("")}</select></label>
         <label class="field"><span>Granja</span><select class="input" id="rNuc"><option value="">Todas</option>${S.nucleos.map((n) => `<option value="${n.id}">${esc(n.nome)}</option>`).join("")}</select></label>
+        <label class="field"><span>Tipo</span><select class="input" id="rTipo"><option value="">Corretivas e preventivas</option><option value="CORRETIVA">Só corretivas</option><option value="PREVENTIVA">Só preventivas</option></select></label>
         <label class="field"><span>Classificação</span><select class="input" id="rPrio"><option value="">Todas</option>${Object.entries(PRIO).map(([k, v]) => `<option value="${k}">${v.rot}</option>`).join("")}</select></label>
       </div>
       <div class="rel-acoes"><span class="muted" id="rInfo"></span><div class="grow"></div>
@@ -1467,7 +1485,7 @@ async function viewRelatorios() {
     </section>
     <div id="relOut"><div class="stack"><div class="skel"></div><div class="skel"></div></div></div></div>`;
   $("#rPer").onchange = () => { const x = $("#rPer").value === "x"; $("#rDeL").hidden = $("#rAteL").hidden = !x; gerarRelatorio(); };
-  ["rDe", "rAte", "rMnt", "rNuc", "rPrio"].forEach((i) => ($("#" + i).onchange = gerarRelatorio));
+  ["rDe", "rAte", "rMnt", "rNuc", "rPrio", "rTipo"].forEach((i) => ($("#" + i).onchange = gerarRelatorio));
   $("#bPdf").onclick = (e) => busy(e.currentTarget, exportarPDF);
   $("#bXls").onclick = (e) => busy(e.currentTarget, exportarExcel);
   gerarRelatorio();
@@ -1488,7 +1506,8 @@ async function gerarRelatorio() {
   if (tok !== S.tok) return;
   const err = rL.error || rT.error || rP.error; if (err) return toast(errMsg(err), true);
   const osInfo = Object.fromEntries(rO.data.map((o) => [o.id, o]));
-  let L = rL.data, T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && (!prio || a.ordens_servico?.prioridade === prio));
+  const tipo = $("#rTipo").value, prevIds = tipo ? await idsPreventivas() : new Set();
+  let L = rL.data.filter((r) => filtroTipo(tipo, prevIds, r.id)), T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && (!prio || a.ordens_servico?.prioridade === prio) && filtroTipo(tipo, prevIds, a.os_id));
   if (mnt) { const osDoMnt = new Set(T.filter((a) => a.manutentor_id === mnt).map((a) => a.os_id)); L = L.filter((r) => r.manutentor_id === mnt || osDoMnt.has(r.id)); T = T.filter((a) => a.manutentor_id === mnt); }
   const pausaAt = (id) => rP.data.filter((p) => p.atendimento_id === id && p.fim).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
   const liq = (a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id);
@@ -1500,7 +1519,7 @@ async function gerarRelatorio() {
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), pend = L.filter((r) => r.status !== "CONCLUÍDA");
   const semInicio = pend.filter((r) => ["ABERTA", "DIRECIONADA", "PENDENTE DE ATENDIMENTO"].includes(r.status));
   const R = {
-    rotPer, ini0, fim0, filtros: [["Período", `${rotPer} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Granja", nuc ? nomeN(nuc) : "Todas"], ["Classificação", prio ? PRIO[prio].rot : "Todas"]],
+    rotPer, ini0, fim0, filtros: [["Período", `${rotPer} (${dataBR(ini0)} a ${dataBR(new Date(fim0 - 1))})`], ["Manutentor", mnt ? nomeU(mnt) : "Todos"], ["Granja", nuc ? nomeN(nuc) : "Todas"], ["Tipo", tipo === "PREVENTIVA" ? "Só preventivas" : tipo === "CORRETIVA" ? "Só corretivas" : "Todas"], ["Classificação", prio ? PRIO[prio].rot : "Todas"]],
     k: { abertas: L.length, concl: concl.length, pct: pct(concl.length, L.length), pend: pend.length, semInicio: semInicio.length, andamento: pend.length - semInicio.length,
       devol: devol.length, recusas: devol.filter((a) => a.resultado === "RECUSADO").length, naoRes: devol.filter((a) => a.resultado === "NAO_RESOLVIDO").length, admin: devol.filter((a) => a.resultado === "DEVOLVIDO").length,
       horas: finT.reduce((s2, a) => s2 + liq(a) + etapaAt(a.id), 0), servico: finT.reduce((s2, a) => s2 + liq(a), 0), desloc: finT.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), material: finT.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0), atendidas: finT.length, medio: media(finT.map(liq)), resposta: media(iniT.map((a) => minEntre(a.iniciada_em, a.direcionada_em))),
