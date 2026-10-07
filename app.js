@@ -1541,6 +1541,26 @@ async function gerarRelatorio() {
   R.pendKeys = pend.map((r) => ({ id: r.id, prio: r.prioridade, status: r.status, pausa: osInfo[r.id]?.pausada_em }));
   R.devolucoes = devol.sort((a, b) => new Date(b.avaliado_em) - new Date(a.avaliado_em)).map((a) => [osId(a.os_id), fmtDH(a.avaliado_em), a.resultado === "RECUSADO" ? "Recusada pelo manutentor" : a.resultado === "DEVOLVIDO" ? "Devolvida pelo administrador" : "Técnico: não resolvido",
     nomeU(a.manutentor_id), a.ordens_servico?.descricao || "", a.motivo_recusa || "—"]);
+  // Etapas de cada OS concluída: quem estava com a OS e por quanto tempo (a soma das etapas = tempo total)
+  const m = (a, b) => (a && b ? Math.max(0, (new Date(a) - new Date(b)) / 6e4) : 0);
+  R.etapas = L.filter((r) => r.status === "CONCLUÍDA").map((r) => {
+    const cic = rT.data.filter((a) => a.os_id === r.id).sort((a, b) => a.ciclo - b.ciclo), pzs = rP.data.filter((p) => p.os_id === r.id && p.fim);
+    let ant = r.aberta_em, ges = 0, fila = 0, bruto = 0, tec = 0;
+    cic.forEach((a) => { ges += m(a.direcionada_em, ant); fila += a.iniciada_em ? m(a.iniciada_em, a.direcionada_em) : m(a.avaliado_em, a.direcionada_em);
+      if (a.iniciada_em && a.finalizada_em) { bruto += m(a.finalizada_em, a.iniciada_em); tec += m(a.avaliado_em, a.finalizada_em); } ant = a.avaliado_em || ant; });
+    const pz = (f) => pzs.filter(f).reduce((s2, p) => s2 + m(p.fim, p.inicio), 0), des = pz((p) => p.motivo === "DESLOCAMENTO"), mat = pz((p) => p.motivo === "MATERIAL"), par = pz((p) => !ehEtapa(p.motivo));
+    return { id: r.id, nuc: r.nucleo_id, gal: r.galpoes, ges, fila, des, mat, serv: Math.max(0, bruto - des - mat - par), par, tec, total: r.min_lead_total ?? m(r.confirmada_em, r.aberta_em), ciclos: cic.length };
+  }).sort((a, b) => b.id - a.id);
+  const E = R.etapas, med = (k) => (E.length ? E.reduce((s2, x) => s2 + x[k], 0) / E.length : 0), mediana2 = (k) => mediana(E.map((x) => x[k]));
+  const ET = [["ges", "Encaminhar (da abertura até o direcionamento)", "Gestor"], ["fila", "Aguardando início (na fila)", "Manutentor"], ["des", "Deslocamento até o local", "Manutentor"],
+    ["mat", "Busca de material", "Manutentor"], ["serv", "Execução do serviço", "Manutentor"], ["par", "Pausas (almoço, peça, fim do expediente…)", "Manutentor"], ["tec", "Confirmação (da finalização até a confirmação)", "Técnico / gestor (preventiva)"]];
+  const totMed = med("total") || 1;
+  R.etapasResumo = ET.map(([k, rot, quem]) => ({ k, rot, quem, media: med(k), mediana: mediana2(k), pct: Math.round((med(k) / totMed) * 100) }));
+  R.etapasTotal = { media: med("total"), mediana: mediana2("total"), n: E.length };
+  R.mntEtapas = mntsR.map((u) => { const f = finT.filter((a) => a.manutentor_id === u.id); if (!f.length) return null;
+    const media = (fn) => f.reduce((s2, a) => s2 + fn(a), 0) / f.length;
+    const des = media((a) => etapaAt(a.id, "DESLOCAMENTO")), mat = media((a) => etapaAt(a.id, "MATERIAL")), par = media((a) => pausaAt(a.id) - etapaAt(a.id));
+    return { nome: u.nome, n: f.length, serv: media((a) => liq(a)), des, mat, par: Math.max(0, par) }; }).filter(Boolean);
   S.rel = R;
   desenharRelatorio(R);
 }
@@ -1581,6 +1601,17 @@ function desenharRelatorio(R) {
       <section><h4>Finalização</h4>${medidor(k.pct, { rot: `${k.concl} de ${k.abertas} OS`, cor: k.pct >= 80 ? "#1E8E4E" : k.pct >= 60 ? "#E8A317" : "#DF2331" })}</section>
       <section><h4>Horas trabalhadas por manutentor</h4>${R.porMnt.length ? barras(R.porMnt.map((l) => ({ l: esc(l[0]), v: l[2], txt: fmtHoras(l[2]), c: "#DF2331" })), Math.max(1, ...R.porMnt.map((l) => l[2]))) : `<div class="zero">Sem atendimentos.</div>`}</section>
     </div>
+    ${R.etapas.length ? `<section class="rel-bloco"><div class="rel-bh"><h3>Onde o tempo foi gasto</h3><span>${R.etapasTotal.n} OS concluídas · média por OS · a soma das etapas é o tempo total</span></div>
+      <div class="etapa-barra">${R.etapasResumo.filter((e) => e.media > 0).map((e, i) => `<i style="flex:${e.media};background:${ETAPA_COR[R.etapasResumo.indexOf(e)]}" title="${e.rot}: ${fmtMin(e.media)}"></i>`).join("")}</div>
+      <div class="etapa-leg">${R.etapasResumo.map((e, i) => `<span><i style="background:${ETAPA_COR[i]}"></i>${ETAPA_CURTO[i]} <b>${e.pct}%</b></span>`).join("")}</div>
+      ${R.mntEtapas.length ? (() => { const mx = Math.max(...R.mntEtapas.map((x) => x.serv + x.des + x.mat + x.par), 1);
+        return `<h4 class="etapa-sub">Tempo do manutentor por atendimento (média)</h4><div class="mnt-barras">${R.mntEtapas.map((x) => `<div class="mb-l"><span>${esc(x.nome)}</span><div class="mb-t">${MNT_PARTES.map(([k2, rot, c]) => x[k2] > 0 ? `<i style="width:${(x[k2] / mx) * 100}%;background:${c}" title="${rot}: ${fmtMin(x[k2])}"></i>` : "").join("")}</div><b>${fmtMin(x.serv + x.des + x.mat + x.par)}</b></div>`).join("")}</div>
+        <div class="etapa-leg">${MNT_PARTES.map(([k2, rot, c]) => `<span><i style="background:${c}"></i>${rot}</span>`).join("")}</div>`; })() : ""}
+      <div class="tscroll"><table class="rt"><thead><tr><th>Etapa</th><th>Quem está com a OS</th><th class="n">Média por OS</th><th class="n">Mediana</th><th class="n">% do tempo total</th></tr></thead><tbody>
+      ${R.etapasResumo.map((e, i) => `<tr><td><i class="etapa-cor" style="background:${ETAPA_COR[i]}"></i><b>${e.rot}</b></td><td>${e.quem}</td><td class="n">${fmtMin(e.media)}</td><td class="n">${fmtMin(e.mediana)}</td><td class="n">${e.pct}%</td></tr>`).join("")}</tbody>
+      <tfoot><tr><td><b>Tempo total (da abertura até a confirmação)</b></td><td></td><td class="n"><b>${fmtMin(R.etapasTotal.media)}</b></td><td class="n"><b>${fmtMin(R.etapasTotal.mediana)}</b></td><td class="n">100%</td></tr></tfoot></table></div></section>
+    ${tabela("Tempo por etapa em cada OS", `OS concluídas no período${R.etapas.length > 40 ? " · 40 mais recentes (todas no PDF e no Excel)" : ""}`, [["OS"], ["Onde"], ["Encaminhar", "n"], ["Fila", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço", "n"], ["Pausas", "n"], ["Confirmar", "n"], ["Total", "n"]],
+      R.etapas.slice(0, 40).map((x) => [`<b>${osId(x.id)}</b>${x.ciclos > 1 ? ` <small class="muted">${x.ciclos} atend.</small>` : ""}`, `${esc(nomeN(x.nuc))} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), `<b>${fmtMin(x.serv)}</b>`, fmtMin(x.par), fmtMin(x.tec), `<b>${fmtMin(x.total)}</b>`]))}` : ""}
     ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
       R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
       R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
@@ -1621,6 +1652,10 @@ async function logoDataURL() {
 }
 const nomeArq = (ext) => `relatorio-manutencao_${S.rel.ini0.toLocaleDateString("sv-SE", { timeZone: TZ })}_${new Date(S.rel.fim0 - 1).toLocaleDateString("sv-SE", { timeZone: TZ })}.${ext}`;
 
+const ETAPA_COR = ["#5B6470", "#A1A4A9", "#2F6BD9", "#E39A12", "#1E8E4E", "#C9A227", "#7C3AED"];
+const ETAPA_CURTO = ["Encaminhar (gestor)", "Fila", "Deslocamento", "Material", "Serviço", "Pausas", "Confirmação (técnico)"];
+const MNT_PARTES = [["serv", "Serviço", "#1E8E4E"], ["des", "Deslocamento", "#2F6BD9"], ["mat", "Material", "#E39A12"], ["par", "Pausas", "#C9A227"]];
+const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 async function exportarPDF() {
   if (!S.rel) return;
   await carregarScript("jspdf.umd.min.js", () => window.jspdf);
@@ -1660,6 +1695,35 @@ async function exportarPDF() {
     y = doc.lastAutoTable.finalY + 9;
   };
   const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
+  if (R.etapas.length) {
+    // gráfico 1: barra empilhada das etapas
+    if (y > 225) { doc.addPage(); y = 18; }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(`Onde o tempo foi gasto · ${R.etapasTotal.n} OS concluídas`, M, y);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(...CINZA); doc.text(`Média por OS: ${fmtMin(R.etapasTotal.media)} da abertura até a confirmação. A soma das etapas é o tempo total.`, M, y + 4.5);
+    let x = M; const BW = W - 2 * M, tot = R.etapasResumo.reduce((s2, e) => s2 + e.media, 0) || 1; y += 7.5;
+    R.etapasResumo.forEach((e, i) => { const w = (e.media / tot) * BW; if (w <= 0) return; doc.setFillColor(...rgb(ETAPA_COR[i])); doc.rect(x, y, w, 8, "F");
+      if (w > 9) { doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(7.5); doc.text(`${e.pct}%`, x + w / 2, y + 5.3, { align: "center" }); } x += w; });
+    y += 12; doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
+    R.etapasResumo.forEach((e, i) => { const cx = M + (i % 3) * (BW / 3), cy = y + Math.floor(i / 3) * 5; doc.setFillColor(...rgb(ETAPA_COR[i])); doc.rect(cx, cy - 2.6, 3, 3, "F");
+      doc.setTextColor(...TINTA); doc.text(`${ETAPA_CURTO[i]} · ${fmtMin(e.media)} (${e.pct}%)`, cx + 4.5, cy); });
+    y += 18;
+    // gráfico 2: tempo do manutentor por atendimento
+    if (R.mntEtapas.length) {
+      if (y + 14 + R.mntEtapas.length * 7 > 280) { doc.addPage(); y = 18; }
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9.5); doc.setTextColor(...TINTA); doc.text("Tempo do manutentor por atendimento (média)", M, y); y += 4;
+      const mx = Math.max(...R.mntEtapas.map((v) => v.serv + v.des + v.mat + v.par), 1), LX = M + 42, LW = BW - 42 - 18;
+      R.mntEtapas.forEach((v) => { doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(...TINTA); doc.text(doc.splitTextToSize(v.nome, 40)[0], M, y + 3.6);
+        let bx = LX; MNT_PARTES.forEach(([k2, , c]) => { const w = (v[k2] / mx) * LW; if (w > 0) { doc.setFillColor(...rgb(c)); doc.rect(bx, y, w, 5, "F"); bx += w; } });
+        doc.setFont("helvetica", "bold"); doc.text(fmtMin(v.serv + v.des + v.mat + v.par), bx + 2, y + 3.6); y += 7; });
+      doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
+      MNT_PARTES.forEach(([, rot, c], i) => { const cx = LX + i * 32; doc.setFillColor(...rgb(c)); doc.rect(cx, y - 0.6, 3, 3, "F"); doc.setTextColor(...TINTA); doc.text(rot, cx + 4.5, y + 2); });
+      y += 10;
+    }
+    secao(`Etapas: média e mediana por OS (${R.etapasTotal.n} OS concluídas)`, ["Etapa", "Quem está com a OS", "Média por OS", "Mediana", "% do total"],
+      [...R.etapasResumo.map((e) => [e.rot, e.quem, fmtMin(e.media), fmtMin(e.mediana), e.pct + "%"]), ["Tempo total (da abertura até a confirmação)", "", fmtMin(R.etapasTotal.media), fmtMin(R.etapasTotal.mediana), "100%"]], { 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" } });
+    secao("Tempo por etapa em cada OS concluída", ["OS", "Onde", "Encaminhar", "Fila", "Desloc.", "Material", "Serviço", "Pausas", "Confirmar", "Total"],
+      R.etapas.map((x) => [osId(x.id), `${nomeN(x.nuc)} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), fmtMin(x.serv), fmtMin(x.par), fmtMin(x.tec), fmtMin(x.total)]), Object.fromEntries([2, 3, 4, 5, 6, 7, 8, 9].map((i) => [i, { halign: "right" }])));
+  }
   secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas", "Deslocamento", "Material", "Tempo médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
     R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(9));
   secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
@@ -1689,6 +1753,10 @@ async function exportarExcel() {
     ["Tempo médio de atendimento (min)", mi(k.medio), "execução líquida"], ["Resposta média (min)", mi(k.resposta), "direcionamento → início"],
     ["Lead médio (min)", mi(k.lead), "abertura → confirmação"], ["Tempo parado (h)", h(k.parado), "pausas"]], [34, 22, 44]);
   wb.Sheets.Resumo["B" + (R.filtros.length + 9)].z = "0%";
+  aba("Etapas (resumo)", [["Etapa", "Quem está com a OS", "Média por OS (min)", "Mediana (min)", "% do tempo total"], ...R.etapasResumo.map((e) => [e.rot, e.quem, Math.round(e.media), Math.round(e.mediana), e.pct / 100]),
+    ["Tempo total (da abertura até a confirmação)", "", Math.round(R.etapasTotal.media), Math.round(R.etapasTotal.mediana), 1]], [40, 28, 18, 14, 16]);
+  aba("Etapas por OS", [["OS", "Granja", "Local", "Atendimentos", "Encaminhar (min)", "Fila (min)", "Deslocamento (min)", "Material (min)", "Serviço (min)", "Pausas (min)", "Confirmar (min)", "Total (min)"],
+    ...R.etapas.map((x) => [osId(x.id), nomeN(x.nuc), localCurto(x.gal), x.ciclos, ...["ges", "fila", "des", "mat", "serv", "par", "tec", "total"].map((k) => Math.round(x[k]))])], [10, 16, 18, 13, 16, 11, 18, 14, 13, 12, 15, 11]);
   aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Deslocamento (h)", "Material (h)", "Tempo médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
     ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 16, 13, 17, 20, 10, 14, 17]);
   aba("Por granja", [["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio (min)"], ...R.porGranja.map((l) => [l[0], l[1], l[2], l[3] / 100, l[4], mi(l[5])])], [18, 10, 12, 14, 14, 18]);

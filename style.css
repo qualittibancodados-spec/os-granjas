@@ -992,3 +992,16 @@ table.rt .linkish { font-size: 13px; }
 /* OS preventiva */
 .tag-prev { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; color: #1E8E4E; background: #EAF7EF; border-radius: 6px; padding: 1px 7px; }
 .tag-prev svg.i { width: 12px; height: 12px; }
+/* relatório: etapas */
+.etapa-barra { display: flex; height: 16px; border-radius: 8px; overflow: hidden; margin: 4px 0 14px; background: var(--line); }
+.etapa-barra i { display: block; min-width: 3px; }
+.etapa-cor { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+.etapa-leg { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: -6px 0 14px; font-size: 12.5px; color: var(--ink-2); }
+.etapa-leg i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.etapa-sub { margin: 6px 0 10px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.mnt-barras { display: grid; gap: 8px; margin-bottom: 12px; }
+.mb-l { display: grid; grid-template-columns: minmax(110px, 180px) 1fr 70px; gap: 12px; align-items: center; font-size: 13px; }
+.mb-l span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-t { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--surface-2); }
+.mb-t i { display: block; height: 100%; }
+.mb-l b { text-align: right; font-weight: 700; }
