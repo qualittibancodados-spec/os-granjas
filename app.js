@@ -5,7 +5,7 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const VERSAO = "7.0";
+const VERSAO = "8.0";
 // Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
 function fetchComPrazo(url, opts = {}) {
   const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
@@ -214,7 +214,7 @@ function telaLogin(msg = "") {
 }
 
 // usuários sem a foto (a lista fica leve mesmo com muita gente); as fotos vêm do cache local e só baixam quando mudam
-const COLS_USU = "id,nome,login,perfis,ativo,excluido_em,foto_em";
+const COLS_USU = "id,nome,login,perfis,ativo,excluido_em,foto_em,push_em";
 async function carregarUsuarios() {
   const { data, error } = await sb.from("usuarios").select(COLS_USU).order("nome");
   if (error) throw error;
@@ -253,7 +253,12 @@ async function iniciar() {
   vigiarAcesso();
   const r = rotas();
   ir(r.find((x) => x.id === S.rota) ? S.rota : r[0].id);
+  setTimeout(sugerirNotificacoes, 1500);
+  const mOs = location.hash.match(/#os=(\d+)/);
+  if (mOs) { history.replaceState(null, "", location.pathname + location.search); setTimeout(() => abrirOS(+mOs[1]), 500); }
 }
+// toque na notificação com o app já aberto: o service worker manda abrir a OS
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { const m = String(e.data?.abrirOS || "").match(/os=(\d+)/); if (m && S.eu) abrirOS(+m[1]); });
 // Telas de "fora do ar": manutenção programada (ligada pelo admin) e servidor sem resposta. Ambas se atualizam sozinhas.
 function telaAviso({ icone, titulo, texto, detalhe = "", seg = 30, acao }) {
   clearInterval(telaAviso.t); S.eu = S.eu && acao === "manut" ? S.eu : null;
@@ -501,11 +506,15 @@ function folhaPerfil() {
         <div class="acoes-foto"><label class="btn btn-sm">${ic("camera")}${S.usuarios[S.eu.id]?.foto ? "Trocar foto" : "Adicionar foto"}<input type="file" accept="image/*" id="fFoto" hidden></label>
         ${S.usuarios[S.eu.id]?.foto ? `<button class="btn btn-sm btn-ghost" id="rmFoto">Remover</button>` : ""}</div></div></div>
       <p class="muted" style="font-size:12px;margin:-2px 0 10px">OS Granjas · versão ${VERSAO}</p>
+      <div class="label">Notificações no celular</div>
+      <div class="notif-st ${estadoNotif() === "ativa" ? "on" : ""}">${ic("bell")}<span>${{ ativa: "Ativas neste aparelho", desligada: "Desligadas", bloqueada: "Bloqueadas nas configurações do celular", instalar: "Instale o app na Tela de Início para ativar", "sem-suporte": "Este navegador não aceita notificações" }[estadoNotif()]}</span>
+        <button class="btn btn-sm" id="btnNotif">${estadoNotif() === "ativa" ? "Ver" : "Ativar"}</button></div>
       <div class="label">O que você pode fazer</div><div class="checks">${S.eu.perfis.map((p) => `<label>${esc(PERFIS[p].nome)}<small>${PERFIS[p].faz}</small></label>`).join("")}</div>`,
     rodape: `<button class="btn" id="btnSenha">${ic("cog")}Alterar senha</button><button class="btn btn-primary" id="btnSair">${ic("logout")}Sair</button>`,
     aoAbrir: (el, fechar) => {
       $("#btnSair", el).onclick = async () => { fechar(); sair(); };
       $("#btnSenha", el).onclick = () => { fechar(); folhaSenha(); };
+      $("#btnNotif", el).onclick = () => { fechar(); folhaNotificacoes("perfil"); };
       const salvar = async (foto) => { await rpc("definir_foto", { p_foto: foto }); await carregarUsuarios(); fechar(); toast(foto ? "Foto atualizada." : "Foto removida."); recarregar(); };
       $("#rmFoto", el)?.addEventListener("click", () => salvar(null).catch((e) => toast(errMsg(e), true)));
       $("#fFoto", el).onchange = async (e) => {
@@ -584,6 +593,7 @@ function sucesso({ titulo, texto, linhas = [], primario, secundario }) {
   });
 }
 function recarregar() { const sel = S.sel; const y = rolagem().scrollTop; ir(S.rota); if (sel && !isMob()) abrirOS(sel); rolagem().scrollTop = y; atualizarBadges(true); }
+
 /* ---------------- cartão de OS ---------------- */
 function acoesRapidas(o) {
   const b = (a, rot, cls = "", i = "") => `<button class="btn btn-sm ${cls}" data-acao="${a}" data-id="${o.id}">${i ? ic(i) : ""}${rot}</button>`;
@@ -1094,6 +1104,7 @@ function novaOS(prev = false) {
   };
   render();
 }
+
 /* ---------------- Painel ---------------- */
 /* ---------------- gráficos (SVG, sem biblioteca) ---------------- */
 function donut(partes, { centro = "", sub = "", tam = 170, esp = 20 } = {}) {
@@ -1378,9 +1389,9 @@ function viewUsuarios(aba = S.abaUsu || "ativo") {
     <div class="dash-bar"><div class="seg" id="uAba" style="margin:0">${[["ativo", "Com acesso"], ["bloqueado", "Bloqueados"], ["excluido", "Excluídos"]]
       .map(([k, r]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}<b>${n(k)}</b></button>`).join("")}</div><div style="flex:1"></div>
       <button class="btn btn-primary" id="novoU">${ic("plus")}Cadastrar usuário</button></div>
-    ${u.length ? `<div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Situação</th></tr></thead>
+    ${u.length ? `<div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Notificações</th><th>Situação</th></tr></thead>
     <tbody>${u.map((x) => `<tr data-u="${x.id}"><td><span class="who-cell">${av(x.id)}${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
-      <td>${x.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td><td><span class="${sit[aba][1]}">${sit[aba][0]}</span></td></tr>`).join("")}</tbody></table></div>`
+      <td>${x.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td><td>${x.push_em ? `<span class="tag ok">${ic("bell")}Ativas</span>` : `<span class="muted">—</span>`}</td><td><span class="${sit[aba][1]}">${sit[aba][0]}</span></td></tr>`).join("")}</tbody></table></div>`
       : `<div class="zero">Nenhum usuário nesta situação.</div>`}
     <p class="muted" style="font-size:12.5px;margin-top:10px">Bloquear ou excluir não apaga o histórico: as OS, atendimentos, materiais e pausas continuam com o nome da pessoa.</p></div>`;
   $("#uAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewUsuarios(b.dataset.a); };
@@ -1448,6 +1459,7 @@ function confirmar({ titulo, texto, botao, perigo, digitar, ok }) {
 /* ---------------- início ---------------- */
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") telaLogin(); });
 iniciar().catch((e) => (erroRede(e) ? telaForaDoAr() : telaLogin(errMsg(e))));
+
 /* ---------------- Relatórios (resumo consolidado + PDF + Excel) ---------------- */
 function faixaPeriodo(sel, de, ate) {
   const d = (iso) => new Date(`${iso}T00:00:00-03:00`), mais = (x, n) => new Date(x.getTime() + n * 864e5);
@@ -1529,7 +1541,7 @@ async function gerarRelatorio() {
   R.porMnt = mntsR.map((u) => { const f = finT.filter((a) => a.manutentor_id === u.id), dv = devol.filter((a) => a.manutentor_id === u.id), ii = iniT.filter((a) => a.manutentor_id === u.id);
     const pp = pz.filter((p) => p.manutentor_id === u.id && !ehEtapa(p.motivo)).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
     return [u.nome, f.length, f.reduce((s2, a) => s2 + liq(a) + etapaAt(a.id), 0), media(f.map(liq)), media(ii.map((a) => minEntre(a.iniciada_em, a.direcionada_em))), dv.filter((a) => a.resultado === "RECUSADO").length, dv.filter((a) => a.resultado === "NAO_RESOLVIDO").length, pp,
-      f.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), f.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0)]; });
+      f.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), f.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0), f.reduce((s2, a) => s2 + liq(a), 0)]; });
   const gIds = [...new Set(L.map((r) => r.nucleo_id))].sort((a, b) => nomeN(a).localeCompare(nomeN(b)));
   R.porGranja = gIds.map((g) => { const l = L.filter((r) => r.nucleo_id === g), c = l.filter((r) => r.status === "CONCLUÍDA").length, f = finT.filter((a) => a.ordens_servico?.nucleo_id === g);
     return [nomeN(g), l.length, c, pct(c, l.length), l.length - c, media(f.map(liq))]; });
@@ -1591,8 +1603,9 @@ function desenharRelatorio(R) {
         ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas${k.admin ? ` · ${k.admin} pelo admin` : ""}`, k.devol > 0)}</div></section>
       <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
         ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
-        ${met("Tempo médio de atendimento", fmtMin(k.medio), "serviço de fato por OS (sem deslocamento, material e pausas)")}
-        ${met("Serviço · deslocamento · material", `${fmtHoras(k.servico)} · ${fmtHoras(k.desloc)} · ${fmtHoras(k.material)}`, "como as horas trabalhadas se dividem")}
+        ${met("Horas de serviço (execução)", fmtHoras(k.servico), `só o serviço de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}% das horas`)}
+        ${met("Deslocamento · material", `${fmtHoras(k.desloc)} · ${fmtHoras(k.material)}`, "fora do tempo de serviço")}
+        ${met("Execução média por atendimento", fmtMin(k.medio), "sem deslocamento, material e pausas")}
         ${met("Resposta média", fmtMin(k.resposta), "do direcionamento ao início")}
         ${met("Lead médio", fmtMin(k.lead), "da abertura à confirmação")}</div></section>
     </div>
@@ -1601,6 +1614,7 @@ function desenharRelatorio(R) {
       <section><h4>Finalização</h4>${medidor(k.pct, { rot: `${k.concl} de ${k.abertas} OS`, cor: k.pct >= 80 ? "#1E8E4E" : k.pct >= 60 ? "#E8A317" : "#DF2331" })}</section>
       <section><h4>Horas trabalhadas por manutentor</h4>${R.porMnt.length ? barras(R.porMnt.map((l) => ({ l: esc(l[0]), v: l[2], txt: fmtHoras(l[2]), c: "#DF2331" })), Math.max(1, ...R.porMnt.map((l) => l[2]))) : `<div class="zero">Sem atendimentos.</div>`}</section>
     </div>
+    ${!R.etapas.length ? `<section class="rel-bloco"><div class="rel-bh"><h3>Onde o tempo foi gasto</h3></div><div class="rel-vazio">Ainda não há OS <b>concluídas</b> no período. A divisão por etapa aparece quando a OS é confirmada pelo técnico (ou pelo gestor, na preventiva). O tempo de serviço dos atendimentos finalizados já aparece nos indicadores acima e na tabela por manutentor.</div></section>` : ""}
     ${R.etapas.length ? `<section class="rel-bloco"><div class="rel-bh"><h3>Onde o tempo foi gasto</h3><span>${R.etapasTotal.n} OS concluídas · média por OS · a soma das etapas é o tempo total</span></div>
       <div class="etapa-barra">${R.etapasResumo.filter((e) => e.media > 0).map((e, i) => `<i style="flex:${e.media};background:${ETAPA_COR[R.etapasResumo.indexOf(e)]}" title="${e.rot}: ${fmtMin(e.media)}"></i>`).join("")}</div>
       <div class="etapa-leg">${R.etapasResumo.map((e, i) => `<span><i style="background:${ETAPA_COR[i]}"></i>${ETAPA_CURTO[i]} <b>${e.pct}%</b></span>`).join("")}</div>
@@ -1612,9 +1626,9 @@ function desenharRelatorio(R) {
       <tfoot><tr><td><b>Tempo total (da abertura até a confirmação)</b></td><td></td><td class="n"><b>${fmtMin(R.etapasTotal.media)}</b></td><td class="n"><b>${fmtMin(R.etapasTotal.mediana)}</b></td><td class="n">100%</td></tr></tfoot></table></div></section>
     ${tabela("Tempo por etapa em cada OS", `OS concluídas no período${R.etapas.length > 40 ? " · 40 mais recentes (todas no PDF e no Excel)" : ""}`, [["OS"], ["Onde"], ["Encaminhar", "n"], ["Fila", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço", "n"], ["Pausas", "n"], ["Confirmar", "n"], ["Total", "n"]],
       R.etapas.slice(0, 40).map((x) => [`<b>${osId(x.id)}</b>${x.ciclos > 1 ? ` <small class="muted">${x.ciclos} atend.</small>` : ""}`, `${esc(nomeN(x.nuc))} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), `<b>${fmtMin(x.serv)}</b>`, fmtMin(x.par), fmtMin(x.tec), `<b>${fmtMin(x.total)}</b>`]))}` : ""}
-    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Tempo médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
-      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
-      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
+    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas trab.", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
+      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), `<b>${fmtHoras(l[10])}</b>`, fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
+      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtHoras(soma(R.porMnt, 10)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
     <div class="rel-2">
       ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
         R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]),
@@ -1677,15 +1691,18 @@ async function exportarPDF() {
   doc.text(R.filtros.slice(1).map(([a, b]) => `${a}: ${b}`).join("     "), M, y);
   // indicadores (2 linhas x 4)
   const kp = [["OS abertas", String(k.abertas), "no período"], ["Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas}`], ["Não atendidas", String(k.pend), `${k.semInicio} sem início`],
-    ["Devolvidas", String(k.devol), `${k.recusas} rec. · ${k.naoRes} não res.`], ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos`], ["Tempo médio", fmtMin(k.medio), "por atendimento"],
-    ["Resposta média", fmtMin(k.resposta), "do direcionamento ao início"], ["Lead médio", fmtMin(k.lead), "da abertura à confirmação"]];
+    ["Devolvidas", String(k.devol), `${k.recusas} rec. · ${k.naoRes} não res.`],
+    ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos`], ["Horas de serviço", fmtHoras(k.servico), `execução de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}%`],
+    ["Deslocamento", fmtHoras(k.desloc), "fora do tempo de serviço"], ["Busca de material", fmtHoras(k.material), "fora do tempo de serviço"],
+    ["Execução média", fmtMin(k.medio), "por atendimento, só serviço"], ["Resposta média", fmtMin(k.resposta), "do direcionamento ao início"],
+    ["Lead médio", fmtMin(k.lead), "da abertura à confirmação"], ["Tempo parado", fmtHoras(k.parado), "pausas (almoço, peça...)"]];
   y += 5; const bw = (W - 2 * M - 9) / 4, bh = 19;
   kp.forEach(([l, v, s2], i) => { const x = M + (i % 4) * (bw + 3), yy = y + Math.floor(i / 4) * (bh + 3);
     doc.setDrawColor(226, 226, 222); doc.setFillColor(250, 250, 249); doc.roundedRect(x, yy, bw, bh, 2, 2, "FD");
     doc.setFontSize(7.5); doc.setTextColor(...CINZA); doc.text(l, x + 3, yy + 5);
     doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(...((l === "Não atendidas" && k.semInicio) || (l === "Devolvidas" && k.devol) ? VERM : TINTA)); doc.text(v, x + 3, yy + 12);
     doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...CINZA); doc.text(s2, x + 3, yy + 16.5); });
-  y += 2 * bh + 10;
+  y += 3 * bh + 13;
   const secao = (tit, head, body, cols = {}) => {
     if (y > 260) { doc.addPage(); y = 18; }
     doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(tit, M, y);
@@ -1695,6 +1712,8 @@ async function exportarPDF() {
     y = doc.lastAutoTable.finalY + 9;
   };
   const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
+  if (!R.etapas.length) { doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text("Onde o tempo foi gasto", M, y);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(...CINZA); doc.text("Ainda não há OS concluídas no período. A divisão por etapa aparece quando a OS é confirmada.", M, y + 5); y += 13; }
   if (R.etapas.length) {
     // gráfico 1: barra empilhada das etapas
     if (y > 225) { doc.addPage(); y = 18; }
@@ -1724,8 +1743,8 @@ async function exportarPDF() {
     secao("Tempo por etapa em cada OS concluída", ["OS", "Onde", "Encaminhar", "Fila", "Desloc.", "Material", "Serviço", "Pausas", "Confirmar", "Total"],
       R.etapas.map((x) => [osId(x.id), `${nomeN(x.nuc)} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), fmtMin(x.serv), fmtMin(x.par), fmtMin(x.tec), fmtMin(x.total)]), Object.fromEntries([2, 3, 4, 5, 6, 7, 8, 9].map((i) => [i, { halign: "right" }])));
   }
-  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas", "Deslocamento", "Material", "Tempo médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
-    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(9));
+  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas trab.", "Serviço", "Desloc.", "Material", "Serviço médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
+    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[10]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(10));
   secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
   secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
   secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
@@ -1757,8 +1776,8 @@ async function exportarExcel() {
     ["Tempo total (da abertura até a confirmação)", "", Math.round(R.etapasTotal.media), Math.round(R.etapasTotal.mediana), 1]], [40, 28, 18, 14, 16]);
   aba("Etapas por OS", [["OS", "Granja", "Local", "Atendimentos", "Encaminhar (min)", "Fila (min)", "Deslocamento (min)", "Material (min)", "Serviço (min)", "Pausas (min)", "Confirmar (min)", "Total (min)"],
     ...R.etapas.map((x) => [osId(x.id), nomeN(x.nuc), localCurto(x.gal), x.ciclos, ...["ges", "fila", "des", "mat", "serv", "par", "tec", "total"].map((k) => Math.round(x[k]))])], [10, 16, 18, 13, 16, 11, 18, 14, 13, 12, 15, 11]);
-  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Deslocamento (h)", "Material (h)", "Tempo médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
-    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 16, 13, 17, 20, 10, 14, 17]);
+  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Horas de serviço (h)", "Deslocamento (h)", "Material (h)", "Serviço médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
+    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[10]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 18, 16, 13, 18, 20, 10, 14, 17]);
   aba("Por granja", [["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio (min)"], ...R.porGranja.map((l) => [l[0], l[1], l[2], l[3] / 100, l[4], mi(l[5])])], [18, 10, 12, 14, 14, 18]);
   aba("Por classificação", [["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar (min)", "Lead médio (min)"], ...R.porPrio.map((l) => [l[0], l[1], l[2], l[3] / 100, mi(l[4]), mi(l[5])])], [16, 10, 12, 14, 18, 17]);
   aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
@@ -1766,6 +1785,7 @@ async function exportarExcel() {
   ["Por granja", "Por classificação"].forEach((n) => { const ws = wb.Sheets[n]; for (let r = 2; r <= 40; r++) if (ws["D" + r]) ws["D" + r].z = "0%"; });
   await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArq("xlsx"));
 }
+
 /* ---------------- Controles (ADMIN): materiais por carro e jornada ---------------- */
 const dhCompleta = (ts) => (ts ? new Date(ts).toLocaleString("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }).replace(",", "") : "");
 const localMat = (g) => ((g || []).length ? local(g) : "Núcleo todo");
@@ -2017,7 +2037,21 @@ async function sistemaDesenhar() {
     <label class="field" style="margin-top:14px"><span>Mensagem para a equipe <em>(opcional)</em></span>
       <input class="input" id="sisMsg" maxlength="300" placeholder="Ex.: atualização do sistema, voltamos às 18h" value="${esc(st.mensagem || "")}"></label>
     <p class="muted" style="font-size:12px">Versão do app: ${VERSAO}</p></section>`;
-  $("#sisOut").innerHTML = cardBackup + cardManut;
+  const { data: ns, error: eNs } = await sb.rpc("status_notificacoes");
+  const cardNotif = eNs ? `<section class="card" style="max-width:720px;margin-bottom:14px"><h3>Notificações no celular</h3><div class="note"><b>Falta instalar a atualização do banco.</b> Rode o arquivo <b>10_notificacoes.sql</b> no SQL Editor do Supabase.</div></section>`
+    : `<section class="card" style="max-width:720px;margin-bottom:14px"><div class="bkp-h"><span class="kpi-ic" style="--kc:#2F6BD9">${ic("bell")}</span><div><h3>Notificações no celular</h3>
+      <p class="muted">Avisa a equipe no celular, mesmo com o app fechado (OS nova, direcionada, emergência, finalizada, devolvida).</p></div></div>
+      <div class="bkp-st ${ns.ativo ? "ok" : "ruim"}">${ic(ns.ativo ? "check" : "alert")}<div><b>${ns.ativo ? "Envio ligado" : "Envio desligado"}</b><small>${ns.pessoas} pessoa(s) com notificação ativa · ${ns.aparelhos} aparelho(s) · ${ns.enviados_7d} aviso(s) nos últimos 7 dias</small></div></div>
+      <div class="acoes"><button class="btn ${ns.ativo ? "" : "btn-primary"}" id="nLigar">${ns.ativo ? "Desligar envio" : `${ic("bell")}Ligar envio de notificações`}</button></div>
+      ${ns.ativo ? "" : `<p class="muted" style="font-size:12.5px">Antes de ligar, publique a função <b>notificar</b> no Supabase (Edge Functions). Depois de ligado, cada pessoa ativa no próprio celular.</p>`}</section>`;
+  $("#sisOut").innerHTML = cardNotif + cardBackup + cardManut;
+  $("#nLigar")?.addEventListener("click", (e) => busy(e.currentTarget, async () => {
+    if (ns.ativo) { await rpc("configurar_notificacoes", { p_url: ns.funcao_url, p_ativo: false }); toast("Envio de notificações desligado."); return sistemaDesenhar(); }
+    await rpc("configurar_notificacoes", { p_url: `${C.SUPABASE_URL}/functions/v1/notificar`, p_ativo: true });
+    const { data: r, error: eF } = await sb.functions.invoke("notificar", { body: { acao: "iniciar" } });
+    if (eF || !r?.ok) { await rpc("configurar_notificacoes", { p_url: `${C.SUPABASE_URL}/functions/v1/notificar`, p_ativo: false }); throw new Error("A função “notificar” não respondeu. Confira se ela foi publicada no Supabase (Edge Functions) com Verify JWT desligado."); }
+    toast("Envio de notificações ligado. Agora cada pessoa pode ativar no celular."); sistemaDesenhar();
+  }));
 
   if (bkOk) {
     const cif = $("#bkCif"), caixa = $("#bkSenhas");
@@ -2067,4 +2101,83 @@ function folhaComoRestaurar() {
       const r = await fetch("abrir-backup.html", { cache: "no-cache" }); if (!r.ok) throw new Error("Não consegui baixar a ferramenta agora.");
       await salvarArquivo(new Blob([await r.text()], { type: "text/html;charset=utf-8" }), "abrir-backup.html"); }); },
   });
+}
+
+/* ---------------- Notificações no celular (push) ---------------- */
+const NOTIF_EX = {
+  manutentor: ["EMERGÊNCIA para atender", "OS-0050 · Aroeira · Av. 101 · Termômetro digital sem leitura"],
+  gestor: ["Nova OS para direcionar", "OS-0053 · Aeroporto · Av. 12 · Cortina não sobe"],
+  tecnico: ["Serviço finalizado: confirme", "OS-0045 · Vinagre 01 · Comedouro não desce ração"],
+  gerente: ["Emergência aberta", "OS-0050 · Aroeira · Termômetro digital sem leitura"], admin: ["Emergência aberta", "OS-0050 · Aroeira · Termômetro digital sem leitura"] };
+const QUANDO_NOTIF = {
+  manutentor: ["Nova OS direcionada para você (Emergência em destaque)", "OS devolvida para você atender de novo"],
+  gestor: ["Nova OS aberta para direcionar", "OS recusada, não resolvida ou devolvida", "Preventiva finalizada para você conferir"],
+  tecnico: ["Serviço finalizado: hora de confirmar", "OS direcionada e iniciada (acompanhamento)"],
+  gerente: ["Emergência aberta"], admin: ["Emergência aberta"] };
+const ehIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const appInstalado = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function estadoNotif() {
+  if (S.usuarios[S.eu.id]?.push_em && (window.DEMO || !("Notification" in window) || Notification.permission !== "denied")) return "ativa";
+  if (window.DEMO) return "desligada";
+  if (ehIOS() && !appInstalado()) return "instalar";
+  if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) return "sem-suporte";
+  if (Notification.permission === "denied") return "bloqueada";
+  return "desligada";
+}
+const urlB64 = (s) => { const p = "=".repeat((4 - (s.length % 4)) % 4), b = atob((s + p).replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from([...b].map((c) => c.charCodeAt(0))); };
+const swPronto = () => Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error("Não foi possível ativar neste navegador. Abra o app pelo ícone instalado e tente de novo.")), 10000))]);
+async function ativarNotificacoes() {
+  let inscr = null;
+  if (!window.DEMO) {
+    const chave = await rpc("chave_push");
+    if (!chave) throw new Error("O envio de notificações ainda não foi ligado pelo administrador. Tente mais tarde.");
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error(perm === "denied" ? "As notificações foram bloqueadas. Libere nas configurações do celular (veja como no seu perfil)." : "Permissão não concedida.");
+    const reg = await swPronto();
+    const atual = await reg.pushManager.getSubscription();
+    inscr = atual || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(chave) }));
+  }
+  await rpc("salvar_push", { p_inscricao: inscr ? inscr.toJSON() : null, p_aparelho: navigator.userAgent.slice(0, 160) });
+  await carregarUsuarios();
+}
+const perfilNotif = () => S.eu.perfis.find((x) => NOTIF_EX[x]) || "gestor";
+const exemploNotif = () => { const [t, d] = NOTIF_EX[perfilNotif()]; return `<div class="notif-ex"><img src="${C.LOGO}" alt=""><div><small>OS GRANJAS · agora</small><b>${t}</b><span>${d}</span></div></div>`; };
+function folhaNotificacoes(origem = "login") {
+  const st = estadoNotif();
+  if (origem === "login") try { localStorage.setItem("osg_notif_perg", String(Date.now())); } catch {}
+  const quando = [...new Set(S.eu.perfis.flatMap((p) => QUANDO_NOTIF[p] || []))];
+  const corpo = st === "instalar"
+    ? `<p>No iPhone, as notificações só funcionam com o app <b>instalado na Tela de Início</b>.</p>
+       <ol class="passos-mini"><li>Abra este endereço no <b>Safari</b>.</li><li>Toque em <b>Compartilhar</b> (quadrado com seta).</li><li><b>Adicionar à Tela de Início</b> → Adicionar.</li><li>Abra o app pelo ícone e toque em <b>Ativar notificações</b>.</li></ol>`
+    : st === "bloqueada"
+      ? `<p>As notificações deste app estão <b>bloqueadas</b> no celular. Para liberar:</p>
+       <ol class="passos-mini"><li><b>Android:</b> segure o ícone do app → Informações do app → Notificações → Permitir.</li><li><b>iPhone:</b> Ajustes → Notificações → OS Granjas → Permitir Notificações.</li><li>Depois, volte aqui e toque em <b>Ativar</b>.</li></ol>`
+      : st === "ativa"
+        ? `<p>As notificações estão <b>ativas</b> neste aparelho. Você recebe avisos como este, mesmo com o app fechado:</p>${exemploNotif()}
+           <p class="muted" style="font-size:12.5px;margin-top:12px">Quer parar de receber? Toque em <b>Desativar neste aparelho</b>. Os avisos continuam no sino, dentro do app.</p>`
+        : `<p>Receba um aviso no celular, <b>mesmo com o app fechado</b>, quando algo precisar de você. Tocando no aviso, o app abre direto na OS.</p>
+       ${exemploNotif()}<div class="label" style="margin-top:14px">Você será avisado quando</div><ul class="lista-notif">${quando.map((q) => `<li>${ic("check")}${q}</li>`).join("")}</ul>`;
+  folha({ titulo: st === "ativa" ? "Notificações ativas" : "Ativar notificações", sub: "Avisos no celular, como os de qualquer aplicativo", corpo,
+    rodape: st === "desligada" || st === "bloqueada" ? `<button class="btn" data-fechar>Agora não</button><button class="btn btn-primary" id="nOk">${ic("bell")}Ativar notificações</button>`
+      : st === "ativa" ? `<button class="btn" id="nDes">Desativar neste aparelho</button><button class="btn btn-primary" data-fechar>Fechar</button>` : `<button class="btn btn-primary" data-fechar>Entendi</button>`,
+    aoAbrir: (el, fechar) => {
+      $("#nOk", el)?.addEventListener("click", (e) => busy(e.currentTarget, async () => { await ativarNotificacoes(); fechar(); toast("Notificações ativadas. Você será avisado mesmo com o app fechado."); }));
+      $("#nDes", el)?.addEventListener("click", (e) => busy(e.currentTarget, async () => { await desativarNotificacoes(); fechar(); toast("Notificações desativadas neste aparelho."); }));
+    } });
+}
+async function desativarNotificacoes() {
+  let endpoint = null;
+  if (!window.DEMO) { const reg = await swPronto(); const s = await reg.pushManager.getSubscription(); if (s) { endpoint = s.endpoint; await s.unsubscribe().catch(() => {}); } }
+  if (endpoint || window.DEMO) await rpc("remover_push", { p_endpoint: endpoint || "demo" });
+  if (window.DEMO) S.usuarios[S.eu.id].push_em = null;
+  await carregarUsuarios();
+}
+// convite automático só para quem precisa agir rápido (técnico, manutentor, gestor); gerente e admin ativam pelo perfil
+function sugerirNotificacoes(tent = 0) {
+  if (!S.eu || !S.eu.perfis.some((p) => ["tecnico", "manutentor", "gestor"].includes(p))) return;
+  const st = estadoNotif(); if (st === "ativa" || st === "sem-suporte") return;
+  let ult = 0; try { ult = +localStorage.getItem("osg_notif_perg") || 0; } catch {}
+  if (Date.now() - ult < 3 * 864e5) return;
+  if ($(".sheet-wrap") || $(".page") || $(".fora")) { if (tent < 40) setTimeout(() => sugerirNotificacoes(tent + 1), 3000); return; }
+  folhaNotificacoes("login");
 }
