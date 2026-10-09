@@ -5,7 +5,7 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const VERSAO = "8.1";
+const VERSAO = "8.3";
 // Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
 function fetchComPrazo(url, opts = {}) {
   const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
@@ -220,6 +220,34 @@ function telaLogin(msg = "") {
 
 // usuários sem a foto (a lista fica leve mesmo com muita gente); as fotos vêm do cache local e só baixam quando mudam
 const COLS_USU = "id,nome,login,perfis,ativo,excluido_em,foto_em,push_em";
+// Ajudantes: equipe de apoio do manutentor líder (sem login). Recebem as mesmas horas do atendimento.
+async function carregarAjudantes() {
+  const { data, error } = await sb.from("ajudantes").select("id,nome,ativo").order("nome");
+  S.ajudantes = error ? {} : Object.fromEntries(data.map((a) => [a.id, a]));
+}
+const nomeAj = (id) => S.ajudantes?.[id]?.nome || "Ajudante";
+const ajAtivos = () => Object.values(S.ajudantes || {}).filter((a) => a.ativo);
+function chipsAjudantes(sel = []) {
+  const lst = ajAtivos();
+  if (!lst.length) return `<div class="note">Nenhum ajudante cadastrado ainda. O administrador cadastra em <b>Usuários → Ajudantes</b>.</div>`;
+  return `<div class="aj-chips" id="ajs">${lst.map((a) => `<button type="button" class="aj-chip" data-aj="${a.id}" aria-pressed="${sel.includes(a.id)}">${ic("user")}${esc(a.nome)}</button>`).join("")}</div>`;
+}
+const ligarChips = (el) => $("#ajs", el)?.addEventListener("click", (e) => { const b = e.target.closest("[data-aj]"); if (b) b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true"); });
+const lerChips = (el) => $$("#ajs .aj-chip[aria-pressed=true]", el).map((b) => b.dataset.aj);
+// Líder de apoio: outro manutentor que acompanha o serviço. As horas dele contam só enquanto apoia
+// (se iniciar ou retomar a própria OS, o apoio encerra sozinho) — nunca em dobro.
+async function ocupacaoAgora() {
+  const { data } = await sb.from("ordens_servico").select("id,manutentor_id,pausada_em").eq("status", "EM ATENDIMENTO").range(0, 999);
+  return Object.fromEntries((data || []).filter((o) => !o.pausada_em).map((o) => [o.manutentor_id, `em andamento na ${osId(o.id)}`]));
+}
+function chipsApoio(sel = [], excluir = [], ocup = {}) {
+  const lst = Object.values(S.usuarios).filter((u) => u.ativo && !u.excluido_em && u.perfis.includes("manutentor") && !excluir.includes(u.id)).sort((a, b) => a.nome.localeCompare(b.nome));
+  if (!lst.length) return `<div class="muted" style="font-size:13px">Nenhum outro manutentor disponível.</div>`;
+  return `<div class="aj-chips" id="aps">${lst.map((u) => `<button type="button" class="aj-chip ap" data-ap="${u.id}" aria-pressed="${sel.includes(u.id)}">${ic("tool")}${esc(u.nome)}${ocup[u.id] ? `<em>${ocup[u.id]}</em>` : ""}</button>`).join("")}</div>`;
+}
+const ligarApoio = (el) => $("#aps", el)?.addEventListener("click", (e) => { const b = e.target.closest("[data-ap]"); if (b) b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true"); });
+const lerApoio = (el) => $$("#aps .aj-chip[aria-pressed=true]", el).map((b) => b.dataset.ap);
+const NOTA_APOIO = `<p class="muted" style="font-size:12.5px;margin-top:8px">O líder de apoio soma horas só enquanto apoia. Se ele iniciar ou retomar a própria OS, o apoio encerra sozinho, então <b>nunca conta em dobro</b>.</p>`;
 async function carregarUsuarios() {
   const { data, error } = await sb.from("usuarios").select(COLS_USU).order("nome");
   if (error) throw error;
@@ -248,7 +276,7 @@ async function iniciar() {
   S.eu = eu;
   if (st.em_manutencao && !eu.perfis.includes("admin")) return telaManutencao(st);
   const [n, g, c, j] = await Promise.all([sb.from("nucleos").select("*").order("nome"), sb.from("galpoes").select("*").order("numero"),
-    sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios()]);
+    sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios(), carregarAjudantes()]);
   if (n.error || g.error) return telaForaDoAr();
   S.nucleos = n.data.map((x) => ({ ...x, galpoes: g.data.filter((y) => y.nucleo_id === x.id).map((y) => y.numero) }));
   S.nucleoPorId = Object.fromEntries(S.nucleos.map((x) => [x.id, x]));
@@ -315,7 +343,7 @@ function vigiarAcesso() {
 // Atualizar: botão no topo e automático ao voltar para o app depois de alguns minutos
 async function atualizarTudo() {
   const b = $("#btnAtualizar"); b?.classList.add("girando");
-  try { await carregarUsuarios(); recarregar(); toast("Atualizado."); } catch (e) { toast(errMsg(e), true); }
+  try { await carregarUsuarios(); await carregarAjudantes(); recarregar(); toast("Atualizado."); } catch (e) { toast(errMsg(e), true); }
   setTimeout(() => $("#btnAtualizar")?.classList.remove("girando"), 600);
 }
 let saiuEm = 0;
@@ -680,6 +708,11 @@ async function viewInicio() {
   }
   if (tem("manutentor")) {
     const { data } = await q().eq("manutentor_id", S.eu.id).in("status", ["DIRECIONADA", "EM ATENDIMENTO"]).order("prioridade_ordem", { ascending: false }).order("id").range(0, 199);
+    const { data: aps } = await sb.from("os_apoios").select("id,os_id,inicio").eq("usuario_id", S.eu.id).is("fim", null);
+    if (aps?.length) { const { data: oa } = await q().in("id", aps.map((a) => a.os_id));
+      html += `<section class="section"><div class="section-h"><h3>Apoiando agora</h3><span class="count">${aps.length}</span></div>${aps.map((a) => { const o = (oa || []).find((x) => x.id === a.os_id) || {};
+        return `<div class="apoio-box"><div>${ic("tool")}<span>Você está apoiando a <b>${osId(a.os_id)}</b> com <b>${esc(nomeU(o.manutentor_id))}</b> desde ${fmtDH(a.inicio)}<small>${esc(o.descricao || "")} · ${esc(nomeN(o.nucleo_id))}</small></span></div>
+          <div class="row"><button class="btn btn-sm" data-ver-os="${a.os_id}">Ver a OS</button><button class="btn btn-sm btn-primary" data-enc-apoio="${a.os_id}">Encerrar meu apoio</button></div></div>`; }).join("")}</section>`; }
     html += secao("Em atendimento agora", data.filter((o) => o.status === "EM ATENDIMENTO"), { acoes: true, vazio: "Nenhum atendimento em andamento." });
     html += secao("Sua fila", data.filter((o) => o.status === "DIRECIONADA").sort((a, b) => (a.tipo === "PREVENTIVA") - (b.tipo === "PREVENTIVA")), { acoes: true, vazio: "Sua fila está vazia. Bom trabalho!" });
   }
@@ -691,6 +724,8 @@ async function viewInicio() {
   $("#verAvisos")?.addEventListener("click", () => folhaAvisos());
   $("#ctaNova")?.addEventListener("click", () => novaOS());
   $("#ctaPrev")?.addEventListener("click", () => novaOS(true));
+  $$("[data-ver-os]").forEach((b) => (b.onclick = () => abrirOS(+b.dataset.verOs)));
+  $$("[data-enc-apoio]").forEach((b) => (b.onclick = () => busy(b, async () => { await rpc("encerrar_apoio", { p_os: +b.dataset.encApoio }); toast("Apoio encerrado. As suas horas de apoio pararam de contar."); recarregar(); })));
   $("#pl").addEventListener("click", (e) => {
     const s = e.target.closest("[data-grupo]"); if (s) { S.lista.grupo = s.dataset.grupo; ir("ordens"); }
     const l = e.target.closest("[data-ir]"); if (l) { e.preventDefault(); ir(l.dataset.ir); }
@@ -790,6 +825,7 @@ async function abrirOS(id) {
     sb.from("os_pausas").select("*").eq("os_id", id).order("id"),
   ]);
   const pausas = pzq.data || [];
+  const { data: apoios } = await sb.from("os_apoios").select("*").eq("os_id", id).order("id"); S.apoiosOS = apoios || [];
   if (os.error) { alvo.innerHTML = `<div class="det"><p class="err">${esc(errMsg(os.error))}</p></div>`; return; }
   alvo.innerHTML = (alvo.id === "pd" ? `<div class="det-bar"><span class="os-id">${osId(id)}</span><button class="icon-btn" data-fechar-det aria-label="Fechar detalhe" title="Fechar (Esc)">${ic("x")}</button></div>` : "")
     + detalheHTML(os.data, hist.data, at.data, lead.data, pausas);
@@ -810,6 +846,9 @@ function proximoPasso(o) {
   const b = (a, rot, cls, i) => `<button class="btn ${cls}" data-acao="${a}">${i ? ic(i) : ""}${rot}</button>`;
   const box = (tom, icone, tit, txt, botoes, sticky = true) => `<div class="next tone${sticky ? " sticky" : ""}" style="--tc:${tom}">
     <div class="next-h">${ic(icone)}${tit}</div><p>${txt}</p><div class="row">${botoes}</div></div>`;
+  { const meu = (S.apoiosOS || []).find((x) => x.os_id === o.id && x.usuario_id === S.eu.id && !x.fim);
+    if (meu) return box("#2F6BD9", "tool", `Você está apoiando esta OS desde ${fmtDH(meu.inicio)}`, `O responsável é ${esc(nomeU(o.manutentor_id))}. Suas horas de apoio contam até você encerrar, até a OS ser finalizada ou até você iniciar a sua própria OS (o que vier primeiro).`,
+      b("encerrar-apoio", "Encerrar meu apoio", "btn-primary", "check")); }
   if (tem("gestor") && ["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(o.status))
     return box("var(--s-aberta)", "send", "Precisa de direcionamento", "Defina a classificação e escolha quem vai atender.", b("direcionar", "Classificar e direcionar", "btn-primary", "send"));
   if (tem("manutentor") && o.manutentor_id === S.eu.id && o.status === "DIRECIONADA")
@@ -849,6 +888,8 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
   const ciclos = [...at].reverse().map((a) => `<div class="cycle">
     <div class="cycle-h">${av(a.manutentor_id, "sm")}<b>${esc(nomeU(a.manutentor_id))}</b><small>Atendimento ${a.ciclo}</small>${a.resultado ? `<span class="tag ${RES[a.resultado][0]}">${RES[a.resultado][1]}</span>` : a.finalizada_em ? `<span class="tag">Aguardando técnico</span>` : `<span class="tag">Em curso</span>`}</div>
     <small>Direcionada ${fmtDH(a.direcionada_em)}${a.iniciada_em ? ` · início ${fmtDH(a.iniciada_em)}` : ""}${a.finalizada_em ? ` · término ${fmtDH(a.finalizada_em)}` : ""}</small>
+    ${(S.apoiosOS || []).filter((x) => x.atendimento_id === a.id).map((x) => `<div class="aj-linha">${ic("tool")}<span>Líder de apoio: <b>${esc(nomeU(x.usuario_id))}</b> · ${fmtDH(x.inicio)} → ${x.fim ? fmtDH(x.fim) : "apoiando agora"}</span></div>`).join("")}
+    ${a.ajudantes?.length ? `<div class="aj-linha">${ic("users")}<span>Ajudantes: <b>${esc(a.ajudantes.map(nomeAj).join(", "))}</b></span></div>` : ""}
     ${(() => { const pz = pausas.filter((p) => p.atendimento_id === a.id); if (!pz.length) return "";
       const dur = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, soma = (f) => pz.filter(f).reduce((s2, p) => s2 + dur(p), 0);
       const tot = soma(() => true), des = soma((p) => p.motivo === "DESLOCAMENTO"), mat = soma((p) => p.motivo === "MATERIAL"), par = tot - des - mat;
@@ -889,6 +930,7 @@ async function executar(acao, id, btn) {
     primario: { rot: "Concluir", fn: () => {} }, secundario: { rot: "Ver a OS", fn: () => abrirOS(o.id) } }); };
   if (acao === "iniciar") return folhaIniciar(o);
   if (acao === "cancelar") return folhaCancelar(o);
+  if (acao === "encerrar-apoio") return busy(btn, async () => { await rpc("encerrar_apoio", { p_os: id }); toast("Apoio encerrado. As suas horas de apoio pararam de contar."); recarregar(); abrirOS(id); });
   if (acao === "material") return busy(btn, async () => { await rpc("pausar_atendimento", { p_os: id, p_motivo: "MATERIAL", p_detalhe: "" });
     toast("Buscando material. Ao voltar, toque em “Voltei · continuar serviço”."); recarregar(); if (isMob()) abrirOS(id); });
   if (acao === "retomar") return busy(btn, async () => { const r = await rpc("retomar_atendimento", { p_os: id });
@@ -920,16 +962,23 @@ async function folhaDirecionar(o, fim) {
       <div class="label">Manutentor <span class="muted" style="font-weight:400">— carga atual entre parênteses</span></div>
       <div class="people" id="pessoas">${mnts.map((u) => { const n = fila.filter((f) => f.manutentor_id === u.id).length;
         return `<button type="button" class="person" data-u="${u.id}" aria-checked="false">${av(u.id)}<span><b>${esc(u.nome)}</b><small>Manutentor</small></span><span class="load"><b>${n}</b>na fila</span></button>`; }).join("")}</div>
+      <div class="label" style="margin-top:14px">Equipe de apoio <span class="muted" style="font-weight:400">— opcional; o líder confirma ao iniciar</span></div>
+      <div class="sub-label">Outro líder (manutentor)</div><div id="apBox"><div class="muted" style="font-size:13px">Escolha o manutentor responsável primeiro.</div></div>
+      <div class="sub-label">Ajudantes</div>${chipsAjudantes([])}${NOTA_APOIO}
       <p class="err" id="erroD"></p>`,
     rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okD">${ic("send")}Direcionar</button>`,
     aoAbrir: (el, fechar) => {
-      marcar($("#prios", el), ".prio-opt"); marcar($("#pessoas", el), ".person");
+      marcar($("#prios", el), ".prio-opt"); marcar($("#pessoas", el), ".person"); ligarChips(el);
+      let ocup = {}; ocupacaoAgora().then((x) => (ocup = x));
+      $("#pessoas", el).addEventListener("click", () => setTimeout(() => { const u = $(".person[aria-checked=true]", el)?.dataset.u; if (!u) return;
+        $("#apBox", el).innerHTML = chipsApoio(lerApoio(el).filter((x) => x !== u), [u], ocup); ligarApoio(el); }));
       $("#okD", el).onclick = (e) => {
         const p = $(".prio-opt[aria-checked=true]", el)?.dataset.p, u = $(".person[aria-checked=true]", el)?.dataset.u;
         if (!p) return ($("#erroD", el).textContent = "Escolha a classificação.");
         if (!u) return ($("#erroD", el).textContent = "Escolha o manutentor.");
-        busy(e.currentTarget, async () => { await rpc("direcionar_os", { p_os: o.id, p_manutentor: u, p_prioridade: p }); fechar();
-          fim(`${osId(o.id)} direcionada`, `${esc(nomeU(u))} já vê esta OS na fila.`, [["Manutentor", esc(nomeU(u))], ["Classificação", sev(p)], ["Serviço", esc(o.descricao)]]); });
+        const aj = lerChips(el), ap = lerApoio(el);
+        busy(e.currentTarget, async () => { await rpc("direcionar_os", { p_os: o.id, p_manutentor: u, p_prioridade: p, ...(aj.length ? { p_ajudantes: aj } : {}), ...(ap.length ? { p_apoio: ap } : {}) }); fechar();
+          fim(`${osId(o.id)} direcionada`, `${esc(nomeU(u))} já vê esta OS na fila.`, [["Manutentor", esc(nomeU(u))], ...(ap.length ? [["Líder de apoio", esc(ap.map(nomeU).join(", "))]] : []), ...(aj.length ? [["Ajudantes", esc(aj.map(nomeAj).join(", "))]] : []), ["Classificação", sev(p)], ["Serviço", esc(o.descricao)]]); });
       };
     },
   });
@@ -1002,14 +1051,19 @@ function folhaIniciar(o) {
   folha({
     titulo: "Iniciar atendimento", sub: `${osId(o.id)} · o que você vai fazer agora?`,
     corpo: `<div class="people" id="etapas">${OP.map(([k, i, t, d]) => `<button type="button" class="person" data-e="${k}" aria-checked="false"><span class="avatar" style="background:var(--surface-2);color:var(--ink-2)">${ic(i)}</span><span><b>${t}</b><small>${d}</small></span></button>`).join("")}</div>
-      <p class="muted" style="font-size:12.5px;margin-top:10px">Os horários são gravados sozinhos. Assim o tempo de serviço fica só com o serviço de fato, e o deslocamento e a busca de material ficam separados.</p><p class="err" id="erroI"></p>`,
+      <div class="label" style="margin-top:16px">Quem está com você hoje? <span class="muted" style="font-weight:400">— toque para marcar ou desmarcar</span></div><div class="sub-label">Outro líder (manutentor)</div><div id="apBox"><div class="muted" style="font-size:13px">Carregando…</div></div><div class="sub-label">Ajudantes</div><div id="ajBox"><div class="muted" style="font-size:13px">Carregando…</div></div>
+      <p class="muted" style="font-size:12.5px;margin-top:10px">Os ajudantes marcados recebem as mesmas horas deste atendimento. Os horários são gravados sozinhos. Assim o tempo de serviço fica só com o serviço de fato, e o deslocamento e a busca de material ficam separados.</p><p class="err" id="erroI"></p>`,
     rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okI">${ic("play")}Iniciar</button>`,
     aoAbrir: (el, fechar) => {
       marcar($("#etapas", el), ".person");
+      Promise.all([sb.from("os_atendimentos").select("ajudantes,apoio_planejado").eq("os_id", o.id).order("ciclo", { ascending: false }).limit(1), ocupacaoAgora()]).then(([{ data }, ocup]) => {
+        $("#ajBox", el).innerHTML = chipsAjudantes(data?.[0]?.ajudantes || []); ligarChips(el);
+        $("#apBox", el).innerHTML = chipsApoio(data?.[0]?.apoio_planejado || [], [S.eu.id], ocup); ligarApoio(el); });
       $("#okI", el).onclick = (e) => {
         const sel = $(".person[aria-checked=true]", el); if (!sel) return ($("#erroI", el).textContent = "Escolha uma opção.");
         const etapa = sel.dataset.e || null;
-        busy(e.currentTarget, async () => { const r = await rpc("iniciar_atendimento", { p_os: o.id, p_etapa: etapa }); fechar();
+        const aj = $("#ajs", el) ? lerChips(el) : undefined, ap = $("#aps", el) ? lerApoio(el) : undefined;
+        busy(e.currentTarget, async () => { const r = await rpc("iniciar_atendimento", { p_os: o.id, p_etapa: etapa, ...(aj ? { p_ajudantes: aj } : {}), ...(ap ? { p_apoio: ap } : {}) }); fechar();
           const msg = etapa === "DESLOCAMENTO" ? "Deslocamento iniciado. Ao chegar, toque em “Cheguei · iniciar serviço”." : etapa === "MATERIAL" ? "Busca de material iniciada. Ao voltar, toque em “Voltei · continuar serviço”." : "Serviço iniciado. Bom trabalho!";
           toast(r?.pausou ? `${msg} ${osId(r.pausou)} foi pausada automaticamente.` : msg); recarregar(); if (isMob()) abrirOS(o.id); });
       };
@@ -1420,15 +1474,38 @@ async function invocarAdmin(body) {
   if (error) { let m = error.message; try { m = (await error.context.json()).erro || m; } catch {} throw new Error(m); }
   return data;
 }
+function viewAjudantes() {
+  const todos = Object.values(S.ajudantes || {}).sort((a, b) => (b.ativo - a.ativo) || a.nome.localeCompare(b.nome)), n = (k) => Object.values(S.usuarios).filter((u) => situacaoU(u) === k).length;
+  $("#view").innerHTML = `<div class="content">
+    <div class="dash-bar"><div class="seg" id="uAba" style="margin:0">${[["ativo", "Com acesso"], ["bloqueado", "Bloqueados"], ["excluido", "Excluídos"]].map(([k, r]) => `<button data-a="${k}" aria-pressed="false">${r}<b>${n(k)}</b></button>`).join("")}<button data-a="ajudantes" aria-pressed="true">Ajudantes<b>${ajAtivos().length}</b></button></div>
+      <div style="flex:1"></div><button class="btn btn-primary" id="novoAj">${ic("plus")}Cadastrar ajudante</button></div>
+    <div class="note" style="margin-bottom:12px"><b>Ajudantes não têm login.</b> O gestor indica quem vai junto ao direcionar a OS, e o líder confirma ao iniciar. Cada ajudante recebe as <b>mesmas horas do atendimento</b> (serviço, deslocamento e material).</div>
+    ${todos.length ? `<div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Situação</th></tr></thead>
+      <tbody>${todos.map((a) => `<tr data-aj="${a.id}"><td><span class="who-cell"><span class="avatar sm" style="background:var(--surface-2);color:var(--ink-2)">${ic("user")}</span>${esc(a.nome)}</span></td><td><span class="onoff${a.ativo ? "" : " off"}">${a.ativo ? "Ativo" : "Inativo"}</span></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="zero">Nenhum ajudante cadastrado.</div>`}
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Desativar não apaga o histórico: as horas que o ajudante já tem continuam nos relatórios.</p></div>`;
+  $("#uAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewUsuarios(b.dataset.a); };
+  $("#novoAj").onclick = () => folhaAjudante(null);
+  $(".users tbody")?.addEventListener("click", (e) => { const tr = e.target.closest("[data-aj]"); if (tr) folhaAjudante(S.ajudantes[tr.dataset.aj]); });
+}
+function folhaAjudante(a) {
+  folha({ titulo: a ? "Editar ajudante" : "Cadastrar ajudante", sub: "Equipe de apoio do manutentor (sem login)",
+    corpo: `<label class="field"><span>Nome completo</span><input class="input" id="ajNome" maxlength="80" value="${a ? esc(a.nome) : ""}" placeholder="Ex.: Antônio Pereira"></label>
+      ${a ? `<label class="check-row"><input type="checkbox" id="ajAtivo" ${a.ativo ? "checked" : ""}> Ativo (aparece para escolher nas OS)</label>` : ""}<p class="err" id="erroAj"></p>`,
+    rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="okAj">${ic("check")}Salvar</button>`,
+    aoAbrir: (el, fechar) => { $("#okAj", el).onclick = (e) => { const nome = $("#ajNome", el).value.trim(); if (nome.length < 3) return ($("#erroAj", el).textContent = "Informe o nome do ajudante.");
+      busy(e.currentTarget, async () => { await rpc("salvar_ajudante", { p_id: a?.id || null, p_nome: nome, p_ativo: a ? $("#ajAtivo", el).checked : true }); await carregarAjudantes(); fechar(); toast(a ? "Ajudante atualizado." : "Ajudante cadastrado."); viewAjudantes(); }); }; } });
+}
 const situacaoU = (u) => (u.excluido_em ? "excluido" : u.ativo ? "ativo" : "bloqueado");
 function viewUsuarios(aba = S.abaUsu || "ativo") {
   S.abaUsu = aba;
+  if (aba === "ajudantes") return viewAjudantes();
   const todos = Object.values(S.usuarios), n = (k) => todos.filter((u) => situacaoU(u) === k).length;
   const u = todos.filter((x) => situacaoU(x) === aba).sort((a, b) => a.nome.localeCompare(b.nome));
   const sit = { ativo: ["Com acesso", "onoff"], bloqueado: ["Bloqueado", "onoff off"], excluido: ["Excluído", "onoff off"] };
   $("#view").innerHTML = `<div class="content">
     <div class="dash-bar"><div class="seg" id="uAba" style="margin:0">${[["ativo", "Com acesso"], ["bloqueado", "Bloqueados"], ["excluido", "Excluídos"]]
-      .map(([k, r]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}<b>${n(k)}</b></button>`).join("")}</div><div style="flex:1"></div>
+      .map(([k, r]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}<b>${n(k)}</b></button>`).join("")}<button data-a="ajudantes" aria-pressed="false">Ajudantes<b>${ajAtivos().length}</b></button></div><div style="flex:1"></div>
       <button class="btn btn-primary" id="novoU">${ic("plus")}Cadastrar usuário</button></div>
     ${u.length ? `<div class="tbl" style="background:var(--surface)"><table class="t users"><thead><tr><th>Nome</th><th>Login</th><th>Perfis</th><th>Notificações</th><th>Situação</th></tr></thead>
     <tbody>${u.map((x) => `<tr data-u="${x.id}"><td><span class="who-cell">${av(x.id)}${esc(x.nome)}</span></td><td class="mono">${esc(x.login)}</td>
@@ -1580,10 +1657,23 @@ async function gerarRelatorio() {
       lead: media(concl.map((r) => r.min_lead_total)), parado },
   };
   const mntsR = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor") && (!mnt || u.id === mnt)).sort((a, b) => a.nome.localeCompare(b.nome));
+  // líderes de apoio: só o intervalo em que de fato apoiaram (sem pausas) — o próprio banco impede sobreposição com a OS deles
+  const { data: apRows } = await todas(sb.from("os_apoios").select("*").gte("inicio", antes).order("id"));
+  const inter = (a0, a1, b0, b1) => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0)) / 6e4, apoioMin = {};
+  (apRows || []).forEach((ap) => { const a = finT.find((x) => x.id === ap.atendimento_id); if (!a) return;
+    const i0 = Math.max(+new Date(a.iniciada_em), +new Date(ap.inicio)), i1 = Math.min(+new Date(a.finalizada_em), +new Date(ap.fim || a.finalizada_em)); if (i1 <= i0) return;
+    const parado = rP.data.filter((p) => p.atendimento_id === a.id && p.fim && !ehEtapa(p.motivo)).reduce((s2, p) => s2 + inter(i0, i1, +new Date(p.inicio), +new Date(p.fim)), 0);
+    apoioMin[ap.usuario_id] = (apoioMin[ap.usuario_id] || 0) + (i1 - i0) / 6e4 - parado; });
+  R.k.horasApoio = Object.values(apoioMin).reduce((a, b) => a + b, 0);
+  { const ac = {};   // ajudantes: mesmas horas dos atendimentos finalizados em que estavam
+    finT.forEach((a) => (a.ajudantes || []).forEach((id) => { const x = (ac[id] ??= { n: 0, serv: 0, des: 0, mat: 0 }); x.n++; x.serv += liq(a); x.des += etapaAt(a.id, "DESLOCAMENTO"); x.mat += etapaAt(a.id, "MATERIAL"); }));
+    R.porAj = Object.entries(ac).map(([id, x]) => [nomeAj(id), x.n, x.serv + x.des + x.mat, x.serv, x.des, x.mat]).sort((a, b) => b[2] - a[2]);
+    R.k.horasAj = R.porAj.reduce((s2, l) => s2 + l[2], 0); R.k.horasHomem = R.k.horas + R.k.horasApoio + R.k.horasAj;
+    R.k.comEquipe = finT.filter((a) => a.ajudantes?.length).length; }
   R.porMnt = mntsR.map((u) => { const f = finT.filter((a) => a.manutentor_id === u.id), dv = devol.filter((a) => a.manutentor_id === u.id), ii = iniT.filter((a) => a.manutentor_id === u.id);
     const pp = pz.filter((p) => p.manutentor_id === u.id && !ehEtapa(p.motivo)).reduce((s2, p) => s2 + ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4, 0);
     return [u.nome, f.length, f.reduce((s2, a) => s2 + liq(a) + etapaAt(a.id), 0), media(f.map(liq)), media(ii.map((a) => minEntre(a.iniciada_em, a.direcionada_em))), dv.filter((a) => a.resultado === "RECUSADO").length, dv.filter((a) => a.resultado === "NAO_RESOLVIDO").length, pp,
-      f.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), f.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0), f.reduce((s2, a) => s2 + liq(a), 0)]; });
+      f.reduce((s2, a) => s2 + etapaAt(a.id, "DESLOCAMENTO"), 0), f.reduce((s2, a) => s2 + etapaAt(a.id, "MATERIAL"), 0), f.reduce((s2, a) => s2 + liq(a), 0), apoioMin[u.id] || 0]; });
   const gIds = [...new Set(L.map((r) => r.nucleo_id))].sort((a, b) => nomeN(a).localeCompare(nomeN(b)));
   R.porGranja = gIds.map((g) => { const l = L.filter((r) => r.nucleo_id === g), c = l.filter((r) => r.status === "CONCLUÍDA").length, f = finT.filter((a) => a.ordens_servico?.nucleo_id === g);
     return [nomeN(g), l.length, c, pct(c, l.length), l.length - c, media(f.map(liq))]; });
@@ -1646,6 +1736,7 @@ function desenharRelatorio(R) {
         ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas${k.admin ? ` · ${k.admin} pelo admin` : ""}`, k.devol > 0)}</div></section>
       <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
         ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
+        ${met("Horas-homem", fmtHoras(k.horasHomem), `${fmtHoras(k.horas)} dos líderes + ${fmtHoras(k.horasApoio)} em apoio + ${fmtHoras(k.horasAj)} dos ajudantes · ${k.comEquipe} atendimento(s) com equipe`)}
         ${met("Horas de serviço (execução)", fmtHoras(k.servico), `só o serviço de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}% das horas`)}
         ${met("Deslocamento · material", `${fmtHoras(k.desloc)} · ${fmtHoras(k.material)}`, "fora do tempo de serviço")}
         ${met("Execução média por atendimento", fmtMin(k.medio), "sem deslocamento, material e pausas")}
@@ -1669,9 +1760,11 @@ function desenharRelatorio(R) {
       <tfoot><tr><td><b>Tempo total (da abertura até a confirmação)</b></td><td></td><td class="n"><b>${fmtMin(R.etapasTotal.media)}</b></td><td class="n"><b>${fmtMin(R.etapasTotal.mediana)}</b></td><td class="n">100%</td></tr></tfoot></table></div></section>
     ${tabela("Tempo por etapa em cada OS", `OS concluídas no período${R.etapas.length > 40 ? " · 40 mais recentes (todas no PDF e no Excel)" : ""}`, [["OS"], ["Onde"], ["Encaminhar", "n"], ["Fila", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço", "n"], ["Pausas", "n"], ["Confirmar", "n"], ["Total", "n"]],
       R.etapas.slice(0, 40).map((x) => [`<b>${osId(x.id)}</b>${x.ciclos > 1 ? ` <small class="muted">${x.ciclos} atend.</small>` : ""}`, `${esc(nomeN(x.nuc))} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), `<b>${fmtMin(x.serv)}</b>`, fmtMin(x.par), fmtMin(x.tec), `<b>${fmtMin(x.total)}</b>`]))}` : ""}
-    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas trab.", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
-      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), `<b>${fmtHoras(l[10])}</b>`, fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
-      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtHoras(soma(R.porMnt, 10)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
+    ${tabela("Ajudantes (equipe de apoio)", "mesmas horas dos atendimentos finalizados em que estavam com o líder", [["Ajudante"], ["Atendimentos", "n"], ["Horas", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"]],
+      R.porAj.map((l) => [`<b>${esc(l[0])}</b>`, l[1], `<b>${fmtHoras(l[2])}</b>`, fmtHoras(l[3]), fmtMin(l[4]), fmtMin(l[5])]), null, "Nenhum atendimento com ajudantes no período.")}
+    ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas trab.", "n"], ["Em apoio", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
+      R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtHoras(l[11]), `<b>${fmtHoras(l[10])}</b>`, fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
+      R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtHoras(soma(R.porMnt, 11)), fmtHoras(soma(R.porMnt, 10)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
     <div class="rel-2">
       ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
         R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]),
@@ -1736,7 +1829,7 @@ async function exportarPDF() {
   // indicadores (2 linhas x 4)
   const kp = [["OS abertas", String(k.abertas), "no período"], ["Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas}`], ["Não atendidas", String(k.pend), `${k.semInicio} sem início`],
     ["Devolvidas", String(k.devol), `${k.recusas} rec. · ${k.naoRes} não res.`],
-    ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos`], ["Horas de serviço", fmtHoras(k.servico), `execução de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}%`],
+    ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atend. · ${fmtHoras(k.horasHomem)} horas-homem`], ["Horas de serviço", fmtHoras(k.servico), `execução de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}%`],
     ["Deslocamento", fmtHoras(k.desloc), "fora do tempo de serviço"], ["Busca de material", fmtHoras(k.material), "fora do tempo de serviço"],
     ["Execução média", fmtMin(k.medio), "por atendimento, só serviço"], ["Resposta média", fmtMin(k.resposta), "do direcionamento ao início"],
     ["Lead médio", fmtMin(k.lead), "da abertura à confirmação"], ["Tempo parado", fmtHoras(k.parado), "pausas (almoço, peça...)"]];
@@ -1787,8 +1880,9 @@ async function exportarPDF() {
     secao("Tempo por etapa em cada OS concluída", ["OS", "Onde", "Encaminhar", "Fila", "Desloc.", "Material", "Serviço", "Pausas", "Confirmar", "Total"],
       R.etapas.map((x) => [osId(x.id), `${nomeN(x.nuc)} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), fmtMin(x.serv), fmtMin(x.par), fmtMin(x.tec), fmtMin(x.total)]), Object.fromEntries([2, 3, 4, 5, 6, 7, 8, 9].map((i) => [i, { halign: "right" }])));
   }
-  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas trab.", "Serviço", "Desloc.", "Material", "Serviço médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
-    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[10]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(10));
+  if (R.porAj.length) secao(`Ajudantes · ${fmtHoras(k.horasAj)} (total de horas-homem: ${fmtHoras(k.horasHomem)})`, ["Ajudante", "Atendimentos", "Horas", "Serviço", "Deslocamento", "Material"], R.porAj.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[3]), fmtMin(l[4]), fmtMin(l[5])]), num(5));
+  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas trab.", "Em apoio", "Serviço", "Desloc.", "Material", "Serviço médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
+    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[11]), fmtHoras(l[10]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(11));
   secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
   secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
   secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
@@ -1821,8 +1915,9 @@ async function exportarExcel() {
     ["Tempo total (da abertura até a confirmação)", "", Math.round(R.etapasTotal.media), Math.round(R.etapasTotal.mediana), 1]], [40, 28, 18, 14, 16]);
   aba("Etapas por OS", [["OS", "Granja", "Local", "Atendimentos", "Encaminhar (min)", "Fila (min)", "Deslocamento (min)", "Material (min)", "Serviço (min)", "Pausas (min)", "Confirmar (min)", "Total (min)"],
     ...R.etapas.map((x) => [osId(x.id), nomeN(x.nuc), localCurto(x.gal), x.ciclos, ...["ges", "fila", "des", "mat", "serv", "par", "tec", "total"].map((k) => Math.round(x[k]))])], [10, 16, 18, 13, 16, 11, 18, 14, 13, 12, 15, 11]);
-  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Horas de serviço (h)", "Deslocamento (h)", "Material (h)", "Serviço médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
-    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[10]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 18, 16, 13, 18, 20, 10, 14, 17]);
+  aba("Ajudantes", [["Ajudante", "Atendimentos", "Horas (h)", "Serviço (h)", "Deslocamento (h)", "Material (h)"], ...R.porAj.map((l) => [l[0], l[1], ...[2, 3, 4, 5].map((i) => Math.round((l[i] / 60) * 100) / 100)])], [26, 14, 12, 12, 16, 12]);
+  aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Horas em apoio (h)", "Horas de serviço (h)", "Deslocamento (h)", "Material (h)", "Serviço médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
+    ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[11]), h(l[10]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 16, 18, 16, 13, 18, 20, 10, 14, 17]);
   aba("Por granja", [["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio (min)"], ...R.porGranja.map((l) => [l[0], l[1], l[2], l[3] / 100, l[4], mi(l[5])])], [18, 10, 12, 14, 14, 18]);
   aba("Por classificação", [["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar (min)", "Lead médio (min)"], ...R.porPrio.map((l) => [l[0], l[1], l[2], l[3] / 100, mi(l[4]), mi(l[5])])], [16, 10, 12, 14, 18, 17]);
   aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
