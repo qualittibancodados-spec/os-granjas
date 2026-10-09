@@ -5,7 +5,7 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const VERSAO = "8.0";
+const VERSAO = "8.1";
 // Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
 function fetchComPrazo(url, opts = {}) {
   const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
@@ -80,7 +80,12 @@ const STATUS = {
   "AGUARDANDO CONFIRMAÇÃO": { rot: "Aguardando confirmação", c: "var(--s-aguardando)", i: "clock" },
   "PENDENTE DE ATENDIMENTO": { rot: "Pendente", c: "var(--s-pendente)", i: "undo" },
   "CONCLUÍDA": { rot: "Concluída", c: "var(--s-concluida)", i: "checkc" },
+  "CANCELADA": { rot: "Cancelada", c: "#8B8079", i: "x" },
 };
+// Cancelar: gestor/admin antes do serviço começar; técnico só a própria OS, enquanto ninguém iniciou
+const MOTIVO_CANC = { RESOLVIDA: "Já resolvida em preventiva ou em outra OS", ENGANO: "Aberta por engano ou duplicada", NAO_MANUT: "Não é serviço de manutenção", OUTRO: "Outro motivo" };
+const podeCancelar = (o) => (tem("gestor") || tem("admin")) ? ["ABERTA", "DIRECIONADA", "PENDENTE DE ATENDIMENTO"].includes(o.status)
+  : tem("tecnico") && o.solicitante_id === S.eu.id && ["ABERTA", "DIRECIONADA"].includes(o.status);
 const ABERTOS = ["ABERTA", "DIRECIONADA", "EM ATENDIMENTO", "AGUARDANDO CONFIRMAÇÃO", "PENDENTE DE ATENDIMENTO"];
 const PRIO = {
   EMERGENCIA: { rot: "Emergência", n: 4, desc: "Risco imediato às aves ou às pessoas: sem água, ventilação ou energia; risco elétrico." },
@@ -422,6 +427,11 @@ async function pendencias() {
     const muitoVelhas = data.filter((o) => (Date.now() - new Date(o.aberta_em)) / 36e5 > 168).length;
     if (muitoVelhas) itens.push({ tipo: "paradas", titulo: `${muitoVelhas} OS abertas há mais de 7 dias`, texto: "Veja em Ordens → Em aberto.", grupo: "abertas", urg: true });
   }
+  { const desde = new Date(Date.now() - 3 * 864e5).toISOString();   // OS canceladas por outra pessoa nos últimos 3 dias
+    const { data: cc } = await sb.from("ordens_servico").select(CAMPOS + ",cancelada_em,cancelada_por,cancel_motivo,cancel_detalhe").eq("status", "CANCELADA").gte("cancelada_em", desde)
+      .or(`solicitante_id.eq.${S.eu.id},manutentor_id.eq.${S.eu.id}`).range(0, 99);
+    (cc || []).filter((o) => o.cancelada_por !== S.eu.id).forEach((o) => itens.push({ os: o.id, tipo: "cancelada", titulo: `OS cancelada · ${osId(o.id)}`, quando: o.cancelada_em, o,
+      texto: `${nomeU(o.cancelada_por)}: ${MOTIVO_CANC[o.cancel_motivo] || ""}${o.cancel_detalhe ? ` — ${o.cancel_detalhe}` : ""}` })); }
   if (tem("admin")) {   // lembrete: backup com mais de 7 dias (ou nunca feito)
     const { data: bk, error: eBk } = await sb.from("backup_registro").select("feito_em").order("feito_em", { ascending: false }).limit(1);
     if (!eBk) {
@@ -455,7 +465,7 @@ async function atualizarBadgesAgora() {
   const b = $('[data-badge="inicio"]'); if (b) { const t = lst.filter((x) => x.acao).length; b.hidden = !t; b.textContent = t; }
   if (n && !S.avisou) { S.avisou = true; folhaAvisos(true); }
 }
-const TIPO_AV = { confirmar: ["checkc", "var(--s-aguardando)", "Confirmar"], direcionar: ["send", "var(--s-aberta)", "Direcionar"], devolvida: ["undo", "var(--s-pendente)", "Direcionar de novo"],
+const TIPO_AV = { cancelada: ["x", "#8B8079", "Cancelada"], confirmar: ["checkc", "var(--s-aguardando)", "Confirmar"], direcionar: ["send", "var(--s-aberta)", "Direcionar"], devolvida: ["undo", "var(--s-pendente)", "Direcionar de novo"],
   atender: ["tool", "var(--s-direcionada)", "Abrir"], pausa: ["pause", "#6A6E75"], paradas: ["clock", "var(--s-pendente)"], emergencia: ["alert", "var(--p-EMERGENCIA)"], backup: ["box", "var(--s-atendimento)"] };
 function folhaAvisos(auto = false) {
   const lst = S.avisos || [], tarefas = lst.filter((x) => x.acao), info = lst.filter((x) => !x.acao && !x.visto), vistos = lst.filter((x) => x.visto);
@@ -613,7 +623,7 @@ function card(o, { acoes = false } = {}) {
   const emerg = o.prioridade === "EMERGENCIA" && o.status !== "CONCLUÍDA";
   const resp = o.manutentor_id && o.status !== "ABERTA" ? o.manutentor_id : o.solicitante_id;
   return `<article class="os${emerg ? " emerg" : ""}${S.sel === o.id ? " sel" : ""}" style="--pc:${PCOR[o.prioridade] || "var(--line)"}" data-os="${o.id}" tabindex="0">
-    <div class="os-top"><span class="os-id">${osId(o.id)}</span>${sev(o.prioridade)}${o.tipo === "PREVENTIVA" ? `<span class="tag-prev">${ic("shield")}Preventiva</span>` : ""}<span class="os-age${late ? " late" : ""}" title="Aberta em ${fmtDH(o.aberta_em)}">${idade(o.aberta_em)}</span></div>
+    <div class="os-top"><span class="os-id">${osId(o.id)}</span>${(o.status === "CANCELADA" ? "" : sev(o.prioridade))}${o.tipo === "PREVENTIVA" ? `<span class="tag-prev">${ic("shield")}Preventiva</span>` : ""}<span class="os-age${late ? " late" : ""}" title="Aberta em ${fmtDH(o.aberta_em)}">${idade(o.aberta_em)}</span></div>
     <div class="os-title">${esc(o.descricao)}</div>
     <div class="os-meta"><span>${ic("pin")}${esc(nomeN(o.nucleo_id))} · ${localCurto(o.galpoes)}</span>${o.equipamento ? `<span>${ic(eqIcon(o.equipamento))}${esc(o.equipamento)}</span>` : ""}</div>
     <div class="os-foot">${stTag(o.status, o)}<span class="who">${av(resp)}${esc(nomeU(resp).split(" ")[0])}</span></div>
@@ -699,6 +709,7 @@ const GRUPOS = () => [
   ["aguardando", "Aguardando técnico", "clock", (q) => q.eq("status", "AGUARDANDO CONFIRMAÇÃO"), (o) => o.status === "AGUARDANDO CONFIRMAÇÃO"],
   ...(podeVerTudo() ? [["preventivas", "Preventivas", "shield", (q) => q.eq("tipo", "PREVENTIVA").in("status", ABERTOS), (o) => o.tipo === "PREVENTIVA" && ABERTOS.includes(o.status)]] : []),
   ["concluidas", "Concluídas", "checkc", (q) => q.eq("status", "CONCLUÍDA"), (o) => o.status === "CONCLUÍDA"],
+  ["canceladas", "Canceladas", "x", (q) => q.eq("status", "CANCELADA"), (o) => o.status === "CANCELADA"],
   ["todas", "Todas", "list", (q) => q, () => true],
 ];
 async function viewOrdens() {
@@ -823,14 +834,15 @@ function proximoPasso(o) {
     "AGUARDANDO CONFIRMAÇÃO": `Aguardando ${nomeU(o.solicitante_id)} confirmar.`,
     "PENDENTE DE ATENDIMENTO": "Voltou para o gestor direcionar novamente.",
     "CONCLUÍDA": `Concluída em ${fmtDH(o.confirmada_em)}.`,
+    "CANCELADA": `Cancelada por ${esc(nomeU(o.cancelada_por))} em ${fmtDH(o.cancelada_em)}: <b>${esc(MOTIVO_CANC[o.cancel_motivo] || "")}</b>${o.cancel_detalhe ? ` — ${esc(o.cancel_detalhe)}` : ""}. Não entra nas estatísticas.`,
   }[o.status];
-  const alt = (tem("gerente") || tem("admin")) && o.prioridade && o.status !== "CONCLUÍDA" ? `<div class="row">${b("classificar", "Alterar classificação", "btn-sm")}</div>` : "";
+  const alt = (tem("gerente") || tem("admin")) && o.prioridade && !["CONCLUÍDA", "CANCELADA"].includes(o.status) ? `<div class="row">${b("classificar", "Alterar classificação", "btn-sm")}</div>` : "";
   return `<div class="next"><div class="next-h">${ic(o.pausada_em ? "pause" : STATUS[o.status].i)}${o.pausada_em ? "Pausada" : STATUS[o.status].rot}</div><p${alt ? "" : ' style="margin-bottom:0"'}>${info}</p>${alt}</div>`;
 }
 function detalheHTML(o, hist, at, lead, pausas = []) {
   const T = ["ABERTA", "DIRECIONADA", "EM ATENDIMENTO", "AGUARDANDO CONFIRMAÇÃO", "CONCLUÍDA"], TR = ["Aberta", "Direcionada", "Atendimento", "Confirmação", "Concluída"];
   const quando = [o.aberta_em, o.direcionada_em, o.iniciada_em, o.finalizada_em, o.confirmada_em];
-  const pos = T.indexOf(o.status), pend = o.status === "PENDENTE DE ATENDIMENTO";
+  const pos = o.status === "CANCELADA" ? 0 : T.indexOf(o.status), pend = o.status === "PENDENTE DE ATENDIMENTO";
   const steps = T.map((_, i) => `<div class="${pend ? (i === 0 ? "on" : i === 1 ? "bad" : "") : i <= pos ? "on" : ""}"><i></i>${TR[i]}${quando[i] && (pend ? i === 0 : i <= pos) ? `<small>${fmtDH(quando[i])}</small>` : ""}</div>`).join("");
   const ult = [...hist].reverse().find((h) => h.status === "PENDENTE DE ATENDIMENTO");
   const RES = { CONFIRMADO: ["ok", "Resolvido"], NAO_RESOLVIDO: ["bad", "Não resolvido"], RECUSADO: ["bad", "Recusada"], DEVOLVIDO: ["", "Devolvida pelo administrador"] };
@@ -853,12 +865,12 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
   const grid = [["Granja", esc(nomeN(o.nucleo_id))], ["Local", local(o.galpoes)], ["Equipamento", esc(o.equipamento || "—")],
     ["Solicitante", esc(nomeU(o.solicitante_id))], ["Aberta em", fmtDH(o.aberta_em)], ["Manutentor", esc(nomeU(o.manutentor_id))]];
   return `<div class="det">
-    <div class="det-head"><span class="os-id">${osId(o.id)}</span>${sev(o.prioridade)}${stTag(o.status, o)}</div>
+    <div class="det-head"><span class="os-id">${osId(o.id)}</span>${(o.status === "CANCELADA" ? "" : sev(o.prioridade))}${stTag(o.status, o)}</div>
     <h2>${esc(o.descricao)}</h2>
     <div class="steps">${steps}</div>
     ${pend && ult ? `<div class="pend-box">${ic("undo")}<div><b>${esc(ult.evento)}</b>${ult.detalhe ? `<p>“${esc(ult.detalhe)}”</p>` : ""}</div></div>` : ""}
     <dl class="det-grid">${grid.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>
-    ${proximoPasso(o)}
+    ${proximoPasso(o)}${podeCancelar(o) ? `<div class="canc-row"><button class="btn btn-sm btn-canc" data-acao="cancelar">${ic("x")}Cancelar esta OS</button></div>` : ""}
     <div class="tabs" role="tablist"><button data-t="at" aria-selected="true">Atendimentos (${at.length})</button><button data-t="hist" aria-selected="false">Linha do tempo</button>${lead ? `<button data-t="lead" aria-selected="false">Tempos</button>` : ""}</div>
     <div data-tab="at">${ciclos || `<div class="zero">Ainda não foi direcionada.</div>`}</div>
     <div data-tab="hist" hidden><ul class="timeline">${linha}</ul></div>
@@ -876,6 +888,7 @@ async function executar(acao, id, btn) {
   const fim = (titulo, texto, linhas) => { fecharPagina(); recarregar(); sucesso({ titulo, texto, linhas,
     primario: { rot: "Concluir", fn: () => {} }, secundario: { rot: "Ver a OS", fn: () => abrirOS(o.id) } }); };
   if (acao === "iniciar") return folhaIniciar(o);
+  if (acao === "cancelar") return folhaCancelar(o);
   if (acao === "material") return busy(btn, async () => { await rpc("pausar_atendimento", { p_os: id, p_motivo: "MATERIAL", p_detalhe: "" });
     toast("Buscando material. Ao voltar, toque em “Voltei · continuar serviço”."); recarregar(); if (isMob()) abrirOS(id); });
   if (acao === "retomar") return busy(btn, async () => { const r = await rpc("retomar_atendimento", { p_os: id });
@@ -999,6 +1012,34 @@ function folhaIniciar(o) {
         busy(e.currentTarget, async () => { const r = await rpc("iniciar_atendimento", { p_os: o.id, p_etapa: etapa }); fechar();
           const msg = etapa === "DESLOCAMENTO" ? "Deslocamento iniciado. Ao chegar, toque em “Cheguei · iniciar serviço”." : etapa === "MATERIAL" ? "Busca de material iniciada. Ao voltar, toque em “Voltei · continuar serviço”." : "Serviço iniciado. Bom trabalho!";
           toast(r?.pausou ? `${msg} ${osId(r.pausou)} foi pausada automaticamente.` : msg); recarregar(); if (isMob()) abrirOS(o.id); });
+      };
+    },
+  });
+}
+function folhaCancelar(o) {
+  const souTec = !(tem("gestor") || tem("admin"));
+  folha({
+    titulo: `Cancelar ${osId(o.id)}`, sub: esc(o.descricao).slice(0, 90),
+    corpo: `<p class="muted" style="margin-bottom:12px">A OS não é apagada: fica como <b>Cancelada</b> no histórico, com o motivo, e <b>sai das estatísticas</b>. ${souTec ? "O gestor" : "O técnico que abriu"}${o.manutentor_id ? " e o manutentor" : ""} ${o.manutentor_id ? "serão avisados" : "será avisado"}.</p>
+      <div class="label">Motivo do cancelamento</div>
+      <div class="people" id="cMot">${Object.entries(MOTIVO_CANC).map(([k, r]) => `<button type="button" class="person" data-m="${k}" aria-checked="false"><span><b>${r}</b></span></button>`).join("")}</div>
+      <label class="field" id="cRefF" hidden style="margin-top:12px"><span>Qual OS ou preventiva resolveu? <em>(opcional)</em></span><input class="input" id="cRef" placeholder="Ex.: OS-0052" maxlength="20"></label>
+      <label class="field" style="margin-top:12px"><span id="cDetR">Observação <em>(opcional)</em></span><textarea class="input" id="cDet" rows="2" maxlength="300" placeholder="Explique em poucas palavras"></textarea></label>
+      <p class="err" id="erroC"></p>`,
+    rodape: `<button class="btn" data-fechar>Voltar</button><button class="btn btn-danger" id="okC">${ic("x")}Cancelar OS</button>`,
+    aoAbrir: (el, fechar) => {
+      let mot = null;
+      $("#cMot", el).addEventListener("click", (e) => { const b = e.target.closest("[data-m]"); if (!b) return; mot = b.dataset.m;
+        $$("#cMot .person", el).forEach((x) => x.setAttribute("aria-checked", x === b)); $("#cRefF", el).hidden = mot !== "RESOLVIDA";
+        $("#cDetR", el).innerHTML = mot === "OUTRO" ? "Explique o motivo <em>(obrigatório)</em>" : "Observação <em>(opcional)</em>"; });
+      $("#okC", el).onclick = (e) => {
+        if (!mot) return ($("#erroC", el).textContent = "Escolha o motivo.");
+        const ref = $("#cRef", el).value.trim(), det = $("#cDet", el).value.trim();
+        if (mot === "OUTRO" && det.length < 5) return ($("#erroC", el).textContent = "Explique o motivo (mínimo de 5 caracteres).");
+        busy(e.currentTarget, async () => {
+          await rpc("cancelar_os", { p_os: o.id, p_motivo: mot, p_detalhe: [ref && `Resolvida em ${ref}`, det].filter(Boolean).join(" · ") || null });
+          fechar(); fecharPagina(); recarregar(); toast(`${osId(o.id)} cancelada. ${souTec ? "O gestor foi avisado." : "O técnico foi avisado."}`);
+        });
       };
     },
   });
@@ -1212,14 +1253,14 @@ async function carregarPainel() {
   const [rL, rA, rT, rP, rAnt] = await Promise.all([todas(qL), todas(qA), todas(qT), todas(qP), todas(qAnt)]);
   if (tok !== S.tok) return;
   const tipo = $("#pTipo").value, prev = tipo ? await idsPreventivas() : new Set(); if (tok !== S.tok) return;
-  const L = rL.data.filter((r) => filtroTipo(tipo, prev, r.id)), A = rA.data.filter((o) => filtroTipo(tipo, prev, o.id)), T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && filtroTipo(tipo, prev, a.os_id));
+  const L = rL.data.filter((r) => r.status !== "CANCELADA" && filtroTipo(tipo, prev, r.id)), A = rA.data.filter((o) => filtroTipo(tipo, prev, o.id)), T = rT.data.filter((a) => a.resultado !== "CANCELADO" && (!nuc || a.ordens_servico?.nucleo_id === nuc) && filtroTipo(tipo, prev, a.os_id));
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
   const durP = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4;
   const pausaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim).reduce((s2, p) => s2 + durP(p), 0);
   const etapaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim && ehEtapa(p.motivo)).reduce((s2, p) => s2 + durP(p), 0);
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), volt = L.filter((r) => r.recusas > 0 || r.nao_resolvidos > 0);
   const h = (o) => (Date.now() - new Date(o.aberta_em)) / 36e5, emerg = A.filter((o) => o.prioridade === "EMERGENCIA").length, velhas = A.filter((o) => h(o) > 168).length;
-  const An = (rAnt.data || []).filter((r) => filtroTipo(tipo, prev, r.id)), cAn = An.filter((r) => r.status === "CONCLUÍDA");
+  const An = (rAnt.data || []).filter((r) => r.status !== "CANCELADA" && filtroTipo(tipo, prev, r.id)), cAn = An.filter((r) => r.status === "CONCLUÍDA");
   const kpi = (i, cor, v, l, s2, d = "", hot = false) => `<div class="kpi${hot ? " hot" : ""}"><div class="kpi-h"><span class="kpi-ic" style="--kc:${cor}">${ic(i)}</span><small>${l}</small></div><b>${v}</b><span class="kpi-s">${s2}</span>${d}</div>`;
   const leadA = mediana(concl.map((r) => r.min_lead_total)), leadB = mediana(cAn.map((r) => r.min_lead_total));
   const comA = mediana(L.map((r) => r.min_ate_inicio)), comB = mediana(An.map((r) => r.min_ate_inicio));
@@ -1519,7 +1560,8 @@ async function gerarRelatorio() {
   const err = rL.error || rT.error || rP.error; if (err) return toast(errMsg(err), true);
   const osInfo = Object.fromEntries(rO.data.map((o) => [o.id, o]));
   const tipo = $("#rTipo").value, prevIds = tipo ? await idsPreventivas() : new Set();
-  let L = rL.data.filter((r) => filtroTipo(tipo, prevIds, r.id)), T = rT.data.filter((a) => (!nuc || a.ordens_servico?.nucleo_id === nuc) && (!prio || a.ordens_servico?.prioridade === prio) && filtroTipo(tipo, prevIds, a.os_id));
+  const canceladas = rL.data.filter((r) => r.status === "CANCELADA" && filtroTipo(tipo, prevIds, r.id));
+  let L = rL.data.filter((r) => r.status !== "CANCELADA" && filtroTipo(tipo, prevIds, r.id)), T = rT.data.filter((a) => a.resultado !== "CANCELADO" && (!nuc || a.ordens_servico?.nucleo_id === nuc) && (!prio || a.ordens_servico?.prioridade === prio) && filtroTipo(tipo, prevIds, a.os_id));
   if (mnt) { const osDoMnt = new Set(T.filter((a) => a.manutentor_id === mnt).map((a) => a.os_id)); L = L.filter((r) => r.manutentor_id === mnt || osDoMnt.has(r.id)); T = T.filter((a) => a.manutentor_id === mnt); }
   const pausaAt = (id) => rP.data.filter((p) => p.atendimento_id === id && p.fim).reduce((s2, p) => s2 + (new Date(p.fim) - new Date(p.inicio)) / 6e4, 0);
   const liq = (a) => minEntre(a.finalizada_em, a.iniciada_em) - pausaAt(a.id);
@@ -1551,6 +1593,7 @@ async function gerarRelatorio() {
     return [osId(r.id), fmtDH(r.aberta_em), `${nomeN(r.nucleo_id)} · ${localCurto(r.galpoes)}`, o.equipamento || "—", o.descricao || "", r.prioridade ? PRIO[r.prioridade].rot : "A classificar",
       o.pausada_em ? "Pausada" : STATUS[r.status].rot, r.manutentor_id ? nomeU(r.manutentor_id) : "—", idade(r.aberta_em)]; });
   R.pendKeys = pend.map((r) => ({ id: r.id, prio: r.prioridade, status: r.status, pausa: osInfo[r.id]?.pausada_em }));
+  R.canceladas = canceladas.sort((a, b) => b.id - a.id).map((r) => [osId(r.id), fmtDH(r.cancelada_em), nomeU(r.cancelada_por), MOTIVO_CANC[r.cancel_motivo] || "—", r.cancel_detalhe || "—", osInfo[r.id]?.descricao || "—"]);
   R.devolucoes = devol.sort((a, b) => new Date(b.avaliado_em) - new Date(a.avaliado_em)).map((a) => [osId(a.os_id), fmtDH(a.avaliado_em), a.resultado === "RECUSADO" ? "Recusada pelo manutentor" : a.resultado === "DEVOLVIDO" ? "Devolvida pelo administrador" : "Técnico: não resolvido",
     nomeU(a.manutentor_id), a.ordens_servico?.descricao || "", a.motivo_recusa || "—"]);
   // Etapas de cada OS concluída: quem estava com a OS e por quanto tempo (a soma das etapas = tempo total)
@@ -1639,6 +1682,7 @@ function desenharRelatorio(R) {
     ${tabela("OS não atendidas", `${R.pendentes.length} OS · da mais antiga para a mais nova`, [["OS"], ["Aberta há", "n"], ["Onde"], ["Equipamento"], ["Serviço", "wide"], ["Classificação"], ["Situação"], ["Manutentor"]],
       R.pendentes.map((l, i) => { const p = R.pendKeys[i] || {}; return [`<span class="mono">${l[0]}</span>`, l[8], esc(l[2]), esc(l[3]), esc(l[4]), sev(p.prio),
         p.pausa ? `<span class="st pausa">${ic("pause")}Pausada</span>` : stTag(p.status), esc(l[7])]; }), null, "Todas as OS do período foram concluídas.")}
+    ${tabela("Canceladas", `${R.canceladas.length} no período · fora dos indicadores acima`, [["OS"], ["Quando"], ["Por"], ["Motivo"], ["Observação", "wide"], ["Serviço", "wide"]], R.canceladas.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], esc(l[2]), esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma OS cancelada no período.")}
     ${tabela("Devoluções", `${R.devolucoes.length} no período`, [["OS"], ["Quando"], ["Tipo"], ["Manutentor"], ["Serviço", "wide"], ["Motivo", "wide"]],
       R.devolucoes.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], `<span class="tag bad">${l[2]}</span>`, esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma devolução no período.")}
     <p class="rel-nota">Horas trabalhadas = registradas no sistema (Iniciar → Finalizar, menos pausas). OS e percentuais consideram as OS abertas no período; horas e tempos, os atendimentos finalizados no período.</p>
@@ -1749,6 +1793,7 @@ async function exportarPDF() {
   secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
   secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
     R.pendentes.map((l) => [l[0], l[1], l[2], l[4], l[5], l[6], l[7], l[8]]), { 3: { cellWidth: 44 } });
+  if (R.canceladas.length) secao(`Canceladas (${R.canceladas.length}) · fora dos indicadores`, ["OS", "Quando", "Por", "Motivo", "Observação", "Serviço"], R.canceladas, { 4: { cellWidth: 38 }, 5: { cellWidth: 40 } });
   secao(`Devoluções (${R.devolucoes.length})`, ["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], R.devolucoes, { 4: { cellWidth: 40 }, 5: { cellWidth: 44 } });
   doc.setFontSize(7.5); doc.setTextColor(...CINZA);
   doc.text("Horas trabalhadas = registradas no sistema (Iniciar a Finalizar, menos pausas). Percentuais sobre as OS abertas no período.", M, Math.min(y, 285));
@@ -1782,6 +1827,7 @@ async function exportarExcel() {
   aba("Por classificação", [["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar (min)", "Lead médio (min)"], ...R.porPrio.map((l) => [l[0], l[1], l[2], l[3] / 100, mi(l[4]), mi(l[5])])], [16, 10, 12, 14, 18, 17]);
   aba("OS não atendidas", [["OS", "Aberta em", "Onde", "Equipamento", "Serviço", "Classificação", "Situação", "Manutentor", "Há"], ...R.pendentes], [10, 16, 26, 24, 40, 14, 22, 22, 10]);
   aba("Devoluções", [["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], ...R.devolucoes], [10, 16, 24, 22, 40, 40]);
+  aba("Canceladas", [["OS", "Quando", "Por", "Motivo", "Observação", "Serviço"], ...R.canceladas], [10, 16, 22, 34, 34, 40]);
   ["Por granja", "Por classificação"].forEach((n) => { const ws = wb.Sheets[n]; for (let r = 2; r <= 40; r++) if (ws["D" + r]) ws["D" + r].z = "0%"; });
   await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), nomeArq("xlsx"));
 }
