@@ -5,7 +5,7 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const VERSAO = "8.3";
+const VERSAO = "8.5";
 // Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
 function fetchComPrazo(url, opts = {}) {
   const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
@@ -276,7 +276,7 @@ async function iniciar() {
   S.eu = eu;
   if (st.em_manutencao && !eu.perfis.includes("admin")) return telaManutencao(st);
   const [n, g, c, j] = await Promise.all([sb.from("nucleos").select("*").order("nome"), sb.from("galpoes").select("*").order("numero"),
-    sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios(), carregarAjudantes()]);
+    sb.from("carros_almoxarifado").select("*").order("codigo"), sb.from("jornada_config").select("*").maybeSingle(), carregarUsuarios(), carregarAjudantes(), carregarJornadas()]);
   if (n.error || g.error) return telaForaDoAr();
   S.nucleos = n.data.map((x) => ({ ...x, galpoes: g.data.filter((y) => y.nucleo_id === x.id).map((y) => y.numero) }));
   S.nucleoPorId = Object.fromEntries(S.nucleos.map((x) => [x.id, x]));
@@ -760,18 +760,22 @@ async function viewOrdens() {
       ${tem("tecnico") ? `<button class="btn btn-brand btn-block mob-only" id="btnNovaL" style="margin-bottom:12px">${ic("plus")}Abrir nova OS</button>` : ""}
       <button class="mostrar" id="btnMostrar"><small>Mostrar</small><span id="mostrarRot"></span>${ic("right")}</button>
       <div class="toolbar"><label class="search">${ic("search")}<input class="input" id="busca" placeholder="Buscar nº, serviço ou equipamento" value="${esc(L.q)}"></label>
+        ${podeVerTudo() ? `<select class="input" id="fPes"><option value="">Todos os funcionários</option>${[["manutentor", "m", "Manutentores"], ["tecnico", "t", "Técnicos (quem abriu)"]].map(([pf, k, rot]) => `<optgroup label="${rot}">${Object.values(S.usuarios).filter((u) => u.perfis.includes(pf) && !u.excluido_em).sort((a, b) => a.nome.localeCompare(b.nome)).map((u) => `<option value="${k}:${u.id}" ${L.pes === `${k}:${u.id}` ? "selected" : ""}>${esc(u.nome)}</option>`).join("")}</optgroup>`).join("")}</select>` : ""}
         ${podeVerTudo() ? `<select class="input" id="fNuc"><option value="">Todas as granjas</option>${S.nucleos.map((n) => `<option value="${n.id}" ${+L.nuc === n.id ? "selected" : ""}>${esc(n.nome)}</option>`).join("")}</select>` : ""}</div>
       <div id="res" class="stack"><div class="skel"></div><div class="skel"></div></div>
       <button class="btn btn-sm more" id="mais" hidden>Mostrar mais</button>
     </div><div class="pane-detail" id="pd">${vazioDetalhe()}</div></div>`;
   let limite = 30, total = 0;
   const tok = S.tok;
-  const escopo = (q) => { if (!podeVerTudo()) q = tem("tecnico") ? q.eq("solicitante_id", S.eu.id) : q.eq("manutentor_id", S.eu.id); return L.nuc ? q.eq("nucleo_id", +L.nuc) : q; };
+  const escopo = (q) => { if (!podeVerTudo()) q = tem("tecnico") ? q.eq("solicitante_id", S.eu.id) : q.eq("manutentor_id", S.eu.id);
+    if (podeVerTudo() && L.pes) { const [k, uid] = L.pes.split(":"); q = q.eq(k === "m" ? "manutentor_id" : "solicitante_id", uid); }
+    return L.nuc ? q.eq("nucleo_id", +L.nuc) : q; };
   const pintarRot = () => { const g = rotG(); $("#mostrarRot").innerHTML = `${ic(g[2])}${g[1]}${cont[g[0]] != null ? `<b>${cont[g[0]]}</b>` : ""}`; };
   async function contar() {
     // o banco devolve só os totais por status e classificação (poucas linhas, mesmo com milhares de OS)
+    const [pk, pu] = (L.pes || ":").split(":");
     const { data } = await sb.rpc("contagem_os", { p_nucleo: L.nuc ? +L.nuc : null,
-      p_solicitante: !podeVerTudo() && tem("tecnico") ? S.eu.id : null, p_manutentor: !podeVerTudo() && !tem("tecnico") ? S.eu.id : null });
+      p_solicitante: !podeVerTudo() && tem("tecnico") ? S.eu.id : pk === "t" ? pu : null, p_manutentor: !podeVerTudo() && !tem("tecnico") ? S.eu.id : pk === "m" ? pu : null });
     if (tok !== S.tok || !data) return;
     cont = Object.fromEntries(GRUPOS().map((g) => [g[0], data.filter((x) => g[4](x)).reduce((a2, x) => a2 + Number(x.qtd), 0)]));
     $$("#folders [data-c]").forEach((b) => (b.textContent = cont[b.dataset.c]));
@@ -796,6 +800,7 @@ async function viewOrdens() {
     aoAbrir: (el, fechar) => { $(".folders-v", el).onclick = (e) => { const b = e.target.closest("[data-g]"); if (b) { fechar(); escolher(b.dataset.g); } }; } });
   $("#busca").oninput = (e) => { L.q = e.target.value; limite = 30; clearTimeout(viewOrdens.t); viewOrdens.t = setTimeout(buscar, 350); };
   $("#fNuc")?.addEventListener("change", (e) => { L.nuc = e.target.value; contar(); buscar(); });
+  $("#fPes")?.addEventListener("change", (e) => { L.pes = e.target.value; contar(); buscar(); });
   $("#mais").onclick = () => { limite += 30; buscar(); };
   $("#btnNovaL")?.addEventListener("click", novaOS);
   ligarLista($("#res"));
@@ -902,7 +907,18 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
   </div>`).join("");
   const EVI = { "OS aberta": "inbox", "Direcionada": "send", "Redirecionada após pendência": "send", "Atendimento iniciado": "play", "Atendimento finalizado": "flag",
     "Serviço confirmado pelo técnico": "checkc", "Técnico informou que não foi resolvido": "undo", "Recusada pelo manutentor": "undo", "Classificação alterada": "alert", "Atendimento pausado": "pause", "Atendimento retomado": "play" };
-  const linha = hist.map((h) => `<li style="--sc:${STATUS[h.status].c}"><span class="tdot">${ic(EVI[h.evento] || "clock")}</span><div><b>${esc(h.evento)}</b>${h.detalhe ? `<p>${esc(h.detalhe)}</p>` : ""}<small>${fmtDH(h.em)} · ${esc(nomeU(h.usuario_id))}</small></div></li>`).join("");
+  const urgD = ["EMERGENCIA", "ALTA"].includes(o.prioridade);
+  const quemDe = (st) => (["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(st) ? ["gestor", null] : st === "AGUARDANDO CONFIRMAÇÃO" ? ["tec", o.solicitante_id] : ["manut", o.manutentor_id]);
+  const linha = hist.map((h, i) => { let dur = "";
+    if (i) { const ant = hist[i - 1], [papel, uid] = quemDe(ant.status), real = (new Date(h.em) - new Date(ant.em)) / 6e4;
+      const min = ant.status === "EM ATENDIMENTO" || urgD ? real : minUteis(uid, ant.em, h.em);
+      if (min >= 1) dur = `<span class="tl-dur" style="--rc:${RESP[papel][2]}">+${fmtMin(min)} com o ${RESP[papel][0].toLowerCase()}</span>`; }
+    return `<li style="--sc:${STATUS[h.status].c}"><span class="tdot">${ic(EVI[h.evento] || "clock")}</span><div>${dur}<b>${esc(h.evento)}</b>${h.detalhe ? `<p>${esc(h.detalhe)}</p>` : ""}<small>${fmtDH(h.em)} · ${esc(nomeU(h.usuario_id))}</small></div></li>`; }).join("");
+  const rr = temposResp(o, at, pausas), aberta = !["CONCLUÍDA", "CANCELADA"].includes(o.status);
+  const blocoResp = `<div class="rsp-os"><div class="rsp-os-h"><b>Tempo com cada responsável</b><small>${aberta ? "até agora · " : ""}${urgD ? "tempo corrido (Emergência/Alta)" : "horas úteis do expediente de cada um"}</small></div>
+    <div class="rsp-os-g">${["gestor", "manut", "tec"].map((k) => `<div style="--rc:${RESP[k][2]}"><small>${RESP[k][0]}</small><b>${fmtMin(rr[k])}</b><span>${RESP[k][1]}</span></div>`).join("")}</div>
+    ${rr.manut ? `<div class="rsp-os-m">${RESP_M.filter(([k2]) => rr[k2] >= 1).map(([k2, r2, c]) => `<span><i style="background:${c}"></i>${r2} <b>${fmtMin(rr[k2])}</b></span>`).join("")}</div>` : ""}
+    <div class="rsp-os-t">Total: <b>${fmtMin(rr.total)}</b></div></div>`;
   const grid = [["Granja", esc(nomeN(o.nucleo_id))], ["Local", local(o.galpoes)], ["Equipamento", esc(o.equipamento || "—")],
     ["Solicitante", esc(nomeU(o.solicitante_id))], ["Aberta em", fmtDH(o.aberta_em)], ["Manutentor", esc(nomeU(o.manutentor_id))]];
   return `<div class="det">
@@ -912,6 +928,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
     ${pend && ult ? `<div class="pend-box">${ic("undo")}<div><b>${esc(ult.evento)}</b>${ult.detalhe ? `<p>“${esc(ult.detalhe)}”</p>` : ""}</div></div>` : ""}
     <dl class="det-grid">${grid.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>
     ${proximoPasso(o)}${podeCancelar(o) ? `<div class="canc-row"><button class="btn btn-sm btn-canc" data-acao="cancelar">${ic("x")}Cancelar esta OS</button></div>` : ""}
+    ${blocoResp}
     <div class="tabs" role="tablist"><button data-t="at" aria-selected="true">Atendimentos (${at.length})</button><button data-t="hist" aria-selected="false">Linha do tempo</button>${lead ? `<button data-t="lead" aria-selected="false">Tempos</button>` : ""}</div>
     <div data-tab="at">${ciclos || `<div class="zero">Ainda não foi direcionada.</div>`}</div>
     <div data-tab="hist" hidden><ul class="timeline">${linha}</ul></div>
@@ -1258,13 +1275,15 @@ const barras = (it, max) => `<div class="bars">${it.map((x) => `<div class="bar"
 const card2 = (t, sub, id, wide = false) => `<section class="card${wide ? " wide" : ""}"><h3>${t}</h3><p class="muted">${sub}</p><div id="${id}"></div></section>`;
 
 async function viewPainel() {
-  $("#view").innerHTML = `<div class="content">
+  $("#view").innerHTML = `<div class="content pnl">
+    <header class="pnl-cab"><div class="pnl-tit"><small>Painel de manutenção das granjas</small><h2 id="pnlTit">Últimos 30 dias</h2><p id="pnlSub">Todas as granjas · corretivas e preventivas</p></div>
     <div class="dash-bar">
       <select class="input" id="pPer"><option value="7">Últimos 7 dias</option><option value="30" selected>Últimos 30 dias</option><option value="90">Últimos 90 dias</option></select>
       <select class="input" id="pTipo"><option value="">Corretivas e preventivas</option><option value="CORRETIVA">Só corretivas</option><option value="PREVENTIVA">Só preventivas</option></select>
       <select class="input" id="pNuc"><option value="">Todas as granjas</option>${S.nucleos.map((n) => `<option value="${n.id}">${esc(n.nome)}</option>`).join("")}</select>
     </div>
-    <div class="seg" id="pSeg">${[["geral", "Visão geral"], ["prio", "Classificação"], ["equipe", "Equipe"], ["locais", "Granjas e equipamentos"], ["mat", "Materiais"]]
+    </header>
+    <div class="seg" id="pSeg">${[["geral", "Visão geral"], ["resp", "Responsáveis"], ["prio", "Classificação"], ["equipe", "Equipe"], ["locais", "Granjas e equipamentos"], ["mat", "Materiais"]]
       .map(([k, r], i) => `<button data-v="${k}" aria-pressed="${i === 0}">${r}</button>`).join("")}</div>
     <div data-v="geral"><div class="kpis" id="kpis"></div><div class="grid2">
       ${card2("Em aberto agora", "OS não concluídas, de qualquer data, por etapa.", "gSit")}
@@ -1272,6 +1291,7 @@ async function viewPainel() {
       ${card2("Onde o tempo é gasto", "Média por etapa das OS concluídas no período.", "gEtapas")}
       ${card2("Retornos ao gestor", "OS que precisaram de novo direcionamento.", "gRet")}
       ${card2("Abertas × concluídas", "Por semana. Abertas acima das concluídas por várias semanas = fila crescendo.", "gSerie", true)}</div></div>
+    <div data-v="resp" hidden><div id="pResp" class="rx"><div class="skel"></div></div></div>
     <div data-v="prio" hidden><div class="grid2">
       ${card2("Fila agora por classificação", "OS não concluídas, de qualquer data.", "gFila")}
       ${card2("Como as OS do período foram classificadas", "Distribuição definida pelo gestor.", "gMix")}
@@ -1291,8 +1311,9 @@ async function viewPainel() {
     <div data-v="mat" hidden><section class="card"><h3>${ic("box")} Material do estoque dos carros</h3><p class="muted">Somado pelo código. Material do almoxarifado não entra aqui.</p><div id="gMat"></div></section></div>
   </div>`;
   $("#pSeg").onclick = (e) => { const b = e.target.closest("[data-v]"); if (!b) return; $$("#pSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); $$("#view [data-v]:not(button)").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v)); };
-  $("#pPer").onchange = $("#pNuc").onchange = $("#pTipo").onchange = carregarPainel;
-  carregarPainel();
+  const titPainel = () => { const t = (id) => $(id).selectedOptions[0]?.textContent || ""; $("#pnlTit").textContent = t("#pPer"); $("#pnlSub").textContent = `${t("#pNuc")} · ${t("#pTipo").toLowerCase()}`; };
+  $("#pPer").onchange = $("#pNuc").onchange = $("#pTipo").onchange = () => { titPainel(); carregarPainel(); };
+  titPainel(); carregarPainel();
 }
 async function carregarPainel() {
   const tok = S.tok, dias = +$("#pPer").value, nuc = $("#pNuc").value ? +$("#pNuc").value : null;
@@ -1308,6 +1329,9 @@ async function carregarPainel() {
   if (tok !== S.tok) return;
   const tipo = $("#pTipo").value, prev = tipo ? await idsPreventivas() : new Set(); if (tok !== S.tok) return;
   const L = rL.data.filter((r) => r.status !== "CANCELADA" && filtroTipo(tipo, prev, r.id)), A = rA.data.filter((o) => filtroTipo(tipo, prev, o.id)), T = rT.data.filter((a) => a.resultado !== "CANCELADO" && (!nuc || a.ordens_servico?.nucleo_id === nuc) && filtroTipo(tipo, prev, a.os_id));
+  if ($("#pResp")) { const conc = L.filter((r) => r.status === "CONCLUÍDA"), { data: ats } = await todas(sb.from("os_atendimentos").select("*").in("os_id", conc.map((r) => r.id).slice(0, 1000)).order("id")),
+      { data: pzs } = await todas(sb.from("os_pausas").select("*").in("os_id", conc.map((r) => r.id).slice(0, 1000)).order("id"));
+    if (tok === S.tok) $("#pResp").innerHTML = htmlResp(agregarResp(conc.map((r) => temposResp(r, ats || [], pzs || [])))); }
   const idsT = new Set(T.map((a) => a.id)), PZ = rP.data.filter((p) => idsT.has(p.atendimento_id));
   const durP = (p) => ((p.fim ? new Date(p.fim) : new Date()) - new Date(p.inicio)) / 6e4;
   const pausaAt = (atId) => PZ.filter((p) => p.atendimento_id === atId && p.fim).reduce((s2, p) => s2 + durP(p), 0);
@@ -1315,7 +1339,7 @@ async function carregarPainel() {
   const concl = L.filter((r) => r.status === "CONCLUÍDA"), volt = L.filter((r) => r.recusas > 0 || r.nao_resolvidos > 0);
   const h = (o) => (Date.now() - new Date(o.aberta_em)) / 36e5, emerg = A.filter((o) => o.prioridade === "EMERGENCIA").length, velhas = A.filter((o) => h(o) > 168).length;
   const An = (rAnt.data || []).filter((r) => r.status !== "CANCELADA" && filtroTipo(tipo, prev, r.id)), cAn = An.filter((r) => r.status === "CONCLUÍDA");
-  const kpi = (i, cor, v, l, s2, d = "", hot = false) => `<div class="kpi${hot ? " hot" : ""}"><div class="kpi-h"><span class="kpi-ic" style="--kc:${cor}">${ic(i)}</span><small>${l}</small></div><b>${v}</b><span class="kpi-s">${s2}</span>${d}</div>`;
+  const kpi = (i, cor, v, l, s2, d = "", hot = false) => `<div class="kpi${hot ? " hot" : ""}" style="--kc:${cor}"><div class="kpi-h"><span class="kpi-ic" style="--kc:${cor}">${ic(i)}</span><small>${l}</small></div><b>${v}</b><span class="kpi-s">${s2}</span>${d}</div>`;
   const leadA = mediana(concl.map((r) => r.min_lead_total)), leadB = mediana(cAn.map((r) => r.min_lead_total));
   const comA = mediana(L.map((r) => r.min_ate_inicio)), comB = mediana(An.map((r) => r.min_ate_inicio));
   $("#kpis").innerHTML = kpi("inbox", "#2F6BD9", L.length, "OS abertas", "no período", delta(L.length, An.length, false))
@@ -1496,6 +1520,48 @@ function folhaAjudante(a) {
     aoAbrir: (el, fechar) => { $("#okAj", el).onclick = (e) => { const nome = $("#ajNome", el).value.trim(); if (nome.length < 3) return ($("#erroAj", el).textContent = "Informe o nome do ajudante.");
       busy(e.currentTarget, async () => { await rpc("salvar_ajudante", { p_id: a?.id || null, p_nome: nome, p_ativo: a ? $("#ajAtivo", el).checked : true }); await carregarAjudantes(); fechar(); toast(a ? "Ajudante atualizado." : "Ajudante cadastrado."); viewAjudantes(); }); }; } });
 }
+// ---------- Horários: expediente padrão e por funcionário (usado nas horas úteis)
+const ORD_DIAS = [1, 2, 3, 4, 5, 6, 0];
+function resumoJornada(j) {
+  const txt = (d) => (j[d] || []).map(([a, b]) => `${a}–${b}`).join(" e ") || "folga", grupos = [];
+  ORD_DIAS.forEach((d) => { const t = txt(d), g = grupos.at(-1); if (g && g.t === t) g.dias.push(d); else grupos.push({ t, dias: [d] }); });
+  const ab = (d) => DIAS_SEM[d].slice(0, 3);
+  return grupos.filter((g) => g.t !== "folga").map((g) => `${g.dias.length > 1 ? `${ab(g.dias[0])}–${ab(g.dias.at(-1))}` : ab(g.dias[0])} ${g.t}`).join(" · ") || "sem expediente";
+}
+function viewHorarios() {
+  const pessoas = Object.values(S.usuarios).filter((u) => u.ativo && !u.excluido_em).sort((a, b) => a.nome.localeCompare(b.nome)), P0 = S.jornadaPadrao || JORNADA_PADRAO, h0 = horasSemana(P0);
+  $("#view").innerHTML = `<div class="content">
+    <div class="seg" id="cAba">${[["mat", "Materiais dos carros"], ["jor", "Jornada e pausas"], ["hor", "Horários"], ["sis", "Sistema"]].map(([k, r]) => `<button data-a="${k}" aria-pressed="${k === "hor"}">${r}</button>`).join("")}</div>
+    <section class="card hor-padrao"><div class="hor-h"><div><h3>${ic("clock")} Expediente padrão da empresa</h3><p class="muted">Vale para todos que não têm horário próprio. Usado para medir os tempos em <b>horas úteis</b>.</p></div>
+      <button class="btn" data-ed="padrao">Editar padrão</button></div>
+      <div class="hor-res"><b>${resumoJornada(P0)}</b><span class="hor-tot ${Math.abs(h0 - 44) > 0.01 ? "dif" : "ok"}">${h0.toLocaleString("pt-BR")} h por semana</span></div>
+      ${Math.abs(h0 - 44) > 0.01 ? `<p class="note" style="margin-top:10px">O padrão soma <b>${h0.toLocaleString("pt-BR")} h</b>, e a jornada contratual é de <b>44 h</b>. Ajuste o almoço ou o sábado para bater (ex.: sábado até as 11h).</p>` : ""}</section>
+    <section class="card"><h3>Horário de cada funcionário</h3><p class="muted">Quem tem horário diferente do padrão (turno, escala) pode ter o seu. Os tempos de espera de cada um passam a contar no horário dele.</p>
+      <div class="tbl"><table class="t hor-t"><thead><tr><th>Nome</th><th>Função</th><th>Expediente</th><th class="n">Horas/semana</th><th></th></tr></thead><tbody>
+      ${pessoas.map((u) => { const j = jornadaDe(u.id), prop = !!S.jornadas?.[u.id];
+        return `<tr><td><span class="who-cell">${av(u.id)}${esc(u.nome)}</span></td><td>${u.perfis.map((p) => `<span class="chip">${PERFIS[p].nome}</span>`).join("")}</td>
+          <td>${resumoJornada(j)} ${prop ? `<span class="tag ok">próprio</span>` : `<span class="tag">padrão</span>`}</td><td class="n"><b>${horasSemana(j).toLocaleString("pt-BR")} h</b></td><td class="n"><button class="btn btn-sm" data-ed="${u.id}">Editar</button></td></tr>`; }).join("")}</tbody></table></div></section></div>`;
+  $("#cAba").onclick = (e) => { const b = e.target.closest("[data-a]"); if (b) viewControles(b.dataset.a); };
+  $$("[data-ed]").forEach((b) => (b.onclick = () => folhaJornada(b.dataset.ed === "padrao" ? null : b.dataset.ed)));
+}
+function folhaJornada(uid) {
+  const base = JSON.parse(JSON.stringify(uid ? jornadaDe(uid) : S.jornadaPadrao || JORNADA_PADRAO)), prop = uid && !!S.jornadas?.[uid];
+  const linha = (d) => { const t = base[d] || []; return `<div class="hj-l" data-d="${d}"><b>${DIAS_SEM[d]}</b>${[0, 1].map((i) => `<span class="hj-t"><input type="time" class="input" data-i="${i}" data-k="0" value="${t[i]?.[0] || ""}"><em>às</em><input type="time" class="input" data-i="${i}" data-k="1" value="${t[i]?.[1] || ""}"></span>`).join("")}</div>`; };
+  folha({ titulo: uid ? `Horário de ${esc(nomeU(uid))}` : "Expediente padrão da empresa", sub: "Dois turnos por dia (antes e depois do almoço). Deixe em branco nos dias de folga.",
+    corpo: `<div class="hj">${ORD_DIAS.map(linha).join("")}</div><div class="hj-tot">Total: <b id="hjTot"></b> por semana <span id="hjAviso"></span></div><p class="err" id="erroJ"></p>`,
+    rodape: `${uid ? `<button class="btn" id="jPad" ${prop ? "" : "disabled"}>Voltar ao padrão</button>` : ""}<button class="btn" data-fechar>Cancelar</button><button class="btn btn-primary" id="jOk">${ic("check")}Salvar</button>`,
+    aoAbrir: (el, fechar) => {
+      const ler = () => { const j = {}; let erro = "";
+        $$(".hj-l", el).forEach((l) => { const d = +l.dataset.d, ts = [0, 1].map((i) => [$(`[data-i="${i}"][data-k="0"]`, l).value, $(`[data-i="${i}"][data-k="1"]`, l).value]).filter(([a, b]) => a || b);
+          ts.forEach(([a, b]) => { if (!a || !b || minHora(b) <= minHora(a)) erro = `${DIAS_SEM[d]}: confira início e fim de cada turno.`; }); if (ts.length) j[d] = ts; });
+        return { j, erro }; };
+      const atual = () => { const { j } = ler(), h = horasSemana(j); $("#hjTot", el).textContent = `${h.toLocaleString("pt-BR")} h`; $("#hjAviso", el).innerHTML = Math.abs(h - 44) < 0.01 ? `<span class="tag ok">44 h</span>` : `<span class="tag">contrato: 44 h</span>`; };
+      el.addEventListener("input", atual); atual();
+      $("#jPad", el)?.addEventListener("click", (e) => busy(e.currentTarget, async () => { await rpc("salvar_horario", { p_usuario: uid, p_dias: null }); await carregarJornadas(); fechar(); toast("Voltou para o expediente padrão."); viewHorarios(); }));
+      $("#jOk", el).onclick = (e) => { const { j, erro } = ler(); if (erro) return ($("#erroJ", el).textContent = erro); if (!Object.keys(j).length) return ($("#erroJ", el).textContent = "Informe pelo menos um dia de trabalho.");
+        busy(e.currentTarget, async () => { await rpc("salvar_horario", { p_usuario: uid, p_dias: j }); await carregarJornadas(); fechar(); toast("Horário salvo."); viewHorarios(); }); };
+    } });
+}
 const situacaoU = (u) => (u.excluido_em ? "excluido" : u.ativo ? "ativo" : "bloqueado");
 function viewUsuarios(aba = S.abaUsu || "ativo") {
   S.abaUsu = aba;
@@ -1595,6 +1661,100 @@ function faixaPeriodo(sel, de, ate) {
 }
 const dataBR = (x) => x.toLocaleDateString("pt-BR", { timeZone: TZ });
 
+/* =====================================================================
+   JORNADA E TEMPOS POR RESPONSÁVEL
+   • Cada pessoa tem o seu expediente (padrão da empresa ou personalizado).
+   • Esperas (gestor encaminhar, fila, pausas, técnico confirmar) contam em horas úteis
+     do expediente de quem estava com a OS. Emergência e Alta contam corrido.
+   • Serviço, deslocamento e material contam o tempo real.
+   ===================================================================== */
+const DIAS_SEM = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+const JORNADA_PADRAO = { 1: [["07:00", "11:00"], ["13:00", "17:00"]], 2: [["07:00", "11:00"], ["13:00", "17:00"]], 3: [["07:00", "11:00"], ["13:00", "17:00"]],
+  4: [["07:00", "11:00"], ["13:00", "17:00"]], 5: [["07:00", "11:00"], ["13:00", "17:00"]], 6: [["07:00", "12:00"]] };
+const jornadaDe = (uid) => (uid && S.jornadas?.[uid]) || S.jornadaPadrao || JORNADA_PADRAO;
+const minHora = (t) => { const [h, m] = String(t).split(":").map(Number); return h * 60 + (m || 0); };
+const horasSemana = (j) => Object.values(j || {}).flat().reduce((s2, [a, b]) => s2 + Math.max(0, minHora(b) - minHora(a)), 0) / 60;
+function minUteis(uid, a, b) {
+  if (!a || !b) return 0; const t0 = +new Date(a), t1 = +new Date(b); if (!(t1 > t0)) return 0;
+  const j = jornadaDe(uid), OFF = 3 * 36e5, d0 = new Date(t0 - OFF); d0.setUTCHours(0, 0, 0, 0); let dia = d0.getTime() + OFF, s = 0;
+  while (dia < t1) { for (const [i, f] of j[new Date(dia - OFF).getUTCDay()] || []) { const x0 = Math.max(dia + minHora(i) * 6e4, t0), x1 = Math.min(dia + minHora(f) * 6e4, t1); if (x1 > x0) s += x1 - x0; } dia += 864e5; }
+  return s / 6e4;
+}
+async function carregarJornadas() {
+  const [{ data: js }, { data: cfg }] = await Promise.all([sb.from("jornadas").select("usuario_id,dias"), sb.from("jornada_config").select("dias_padrao").maybeSingle()]);
+  S.jornadas = Object.fromEntries((js || []).map((x) => [x.usuario_id, x.dias])); S.jornadaPadrao = cfg?.dias_padrao || JORNADA_PADRAO;
+}
+const RESP = { gestor: ["Gestor", "encaminhar / direcionar", "#7E0C16"], manut: ["Manutentor", "da OS chegar até finalizar", "#1E8E4E"], tec: ["Técnico", "confirmar o serviço", "#C9A227"] };
+const RESP_M = [["fila", "Fila (até iniciar)", "#A1A4A9"], ["des", "Deslocamento", "#2F6BD9"], ["mat", "Material", "#E39A12"], ["serv", "Serviço", "#1E8E4E"], ["par", "Pausas", "#C9B98F"]];
+// Tempo de cada responsável numa OS. A soma (gestor + manutentor + técnico) é o tempo total da OS.
+function temposResp(o, ats, pzs) {
+  const urg = ["EMERGENCIA", "ALTA"].includes(o.prioridade), agora = new Date().toISOString();
+  const real = (a, b) => (a && b ? Math.max(0, (new Date(b) - new Date(a)) / 6e4) : 0), util = (uid, a, b) => (urg ? real(a, b) : minUteis(uid, a, b));
+  const fimOS = o.status === "CANCELADA" ? o.cancelada_em : null;
+  const r = { gestor: 0, fila: 0, des: 0, mat: 0, serv: 0, par: 0, tec: 0, partes: [], urg };
+  const cic = [...ats].filter((a) => a.os_id === o.id).sort((x, y) => x.ciclo - y.ciclo);
+  let ant = o.aberta_em;
+  cic.forEach((a, i) => {
+    const ult = i === cic.length - 1, g = util(a.gestor_id, ant, a.direcionada_em); r.gestor += g; r.partes.push(["gestor", a.gestor_id, g]);
+    const fimFila = a.iniciada_em || a.avaliado_em || fimOS || (ult ? agora : null), fl = util(a.manutentor_id, a.direcionada_em, fimFila); r.fila += fl;
+    let manut = fl;
+    if (a.iniciada_em) {
+      const fim = a.finalizada_em || fimOS || agora, pz = pzs.filter((p) => p.atendimento_id === a.id);
+      const soma = (f, fn = real) => pz.filter(f).reduce((s2, p) => s2 + fn(p.inicio, p.fim || fim), 0);
+      const des = soma((p) => p.motivo === "DESLOCAMENTO"), mat = soma((p) => p.motivo === "MATERIAL"), parReal = soma((p) => !ehEtapa(p.motivo));
+      const par = urg ? parReal : soma((p) => !ehEtapa(p.motivo), (x, y) => minUteis(a.manutentor_id, x, y)), serv = Math.max(0, real(a.iniciada_em, fim) - des - mat - parReal);
+      r.des += des; r.mat += mat; r.serv += serv; r.par += par; manut += des + mat + serv + par;
+      if (a.finalizada_em) { const t = util(o.solicitante_id, a.finalizada_em, a.avaliado_em || fimOS || (ult ? agora : null)); r.tec += t; r.partes.push(["tec", o.solicitante_id, t]); }
+    }
+    r.partes.push(["manut", a.manutentor_id, manut, { fila: fl }]);
+    ant = a.avaliado_em || ant;
+  });
+  if (!cic.length) { const g = util(null, o.aberta_em, fimOS || agora); r.gestor += g; r.partes.push(["gestor", null, g]); }
+  r.manut = r.fila + r.des + r.mat + r.serv + r.par; r.total = r.gestor + r.manut + r.tec; return r;
+}
+// com quem a OS está agora (para pendências)
+function comQuem(o, ats) {
+  const a = [...ats].filter((x) => x.os_id === o.id).sort((x, y) => x.ciclo - y.ciclo).at(-1);
+  if (["ABERTA", "PENDENTE DE ATENDIMENTO"].includes(o.status) || !a) return ["gestor", null, a?.avaliado_em || o.aberta_em];
+  if (o.status === "AGUARDANDO CONFIRMAÇÃO") return ["tec", o.solicitante_id, a.finalizada_em];
+  return ["manut", a.manutentor_id, a.direcionada_em];
+}
+// Agrega por responsável e por pessoa (OS concluídas do período)
+function agregarResp(lista) {
+  const n = lista.length || 1, med = (k) => lista.reduce((s2, x) => s2 + x[k], 0) / n, mdn = (k) => mediana(lista.map((x) => x[k]));
+  const ag = { n: lista.length, media: {}, mediana: {} };
+  ["gestor", "manut", "tec", "total", "fila", "des", "mat", "serv", "par"].forEach((k) => { ag.media[k] = lista.length ? med(k) : 0; ag.mediana[k] = mdn(k); });
+  const rk = (papel) => { const m = {}; lista.forEach((x) => x.partes.filter((p) => p[0] === papel && p[1]).forEach(([, uid, min, ex]) => { const e = (m[uid] ??= { uid, v: [], fila: [] }); e.v.push(min); if (ex) e.fila.push(ex.fila); }));
+    return Object.values(m).map((e) => ({ uid: e.uid, nome: nomeU(e.uid), n: e.v.length, media: e.v.reduce((a, b) => a + b, 0) / e.v.length, mediana: mediana(e.v), fila: e.fila.length ? e.fila.reduce((a, b) => a + b, 0) / e.fila.length : 0 })).sort((a, b) => b.media - a.media); };
+  ag.rk = { gestor: rk("gestor"), manut: rk("manut"), tec: rk("tec") };
+  return ag;
+}
+// HTML do bloco "Tempos por responsável" (relatório e painel)
+function htmlResp(ag, { compacto = false } = {}) {
+  if (!ag.n) return `<div class="rx-card"><div class="rel-vazio">Ainda não há OS concluídas no período para medir os tempos por responsável.</div></div>`;
+  const tot = ag.media.total || 1;
+  const card = (k) => { const [rot, sub, cor] = RESP[k]; return `<button class="rsp-c" data-ir="resp" style="--rc:${cor}"><small>${rot}</small><b>${fmtMin(ag.media[k])}</b><span>${sub}</span>
+    <div class="rsp-bar"><i style="width:${Math.round((ag.media[k] / tot) * 100)}%"></i></div><em>${Math.round((ag.media[k] / tot) * 100)}% do tempo total · mediana ${fmtMin(ag.mediana[k])}</em></button>`; };
+  const pilha = `<div class="rsp-pilha">${["gestor", "manut", "tec"].map((k) => `<i style="flex:${ag.media[k] || 0.0001};background:${RESP[k][2]}" title="${RESP[k][0]}"></i>`).join("")}</div>
+    <div class="rsp-leg">${["gestor", "manut", "tec"].map((k) => `<span><i style="background:${RESP[k][2]}"></i>${RESP[k][0]} ${Math.round((ag.media[k] / tot) * 100)}%</span>`).join("")}<span class="rsp-tot">Total médio: <b>${fmtMin(ag.media.total)}</b> por OS</span></div>`;
+  const mx = (arr) => Math.max(1, ...arr.map((x) => x.media));
+  const ranking = (tit, sub, papel, cor, vazio) => { const lst = ag.rk[papel], m = mx(lst);
+    return `<div class="rx-card"><h4>${tit} <em>${lst.length}</em></h4><p class="rx-nota" style="margin:-6px 0 12px">${sub}</p>${lst.length ? `<div class="rx-rows">${lst.map((x, i) => `<div class="rx-row">
+      <span class="rx-row-l"><span class="rx-lab"><b>${esc(x.nome)}</b><small>${x.n} OS</small></span></span>
+      <div class="rx-hb"><i style="width:${(x.media / m) * 100}%;background:${cor}"></i></div><span class="rx-row-v"><b>${fmtMin(x.media)}</b></span><span class="rx-row-s">mediana ${fmtMin(x.mediana)}</span></div>`).join("")}</div>` : `<div class="rel-vazio">${vazio}</div>`}</div>`; };
+  const mM = ag.media, totM = mM.manut || 1;
+  const quebra = `<div class="rx-card"><h4>Tempo com o manutentor, em partes</h4><div class="rsp-pilha fina">${RESP_M.map(([k, , c]) => `<i style="flex:${mM[k] || 0.0001};background:${c}"></i>`).join("")}</div>
+    <div class="rsp-leg">${RESP_M.map(([k, r, c]) => `<span><i style="background:${c}"></i>${r} <b>${fmtMin(mM[k])}</b></span>`).join("")}</div>
+    <p class="rx-nota">Serviço de fato: <b>${fmtMin(mM.serv)}</b> por OS (${Math.round((mM.serv / totM) * 100)}% do tempo com o manutentor).</p></div>`;
+  return `<div class="rsp-grid">${card("gestor")}${card("manut")}${card("tec")}</div>
+    <div class="rx-card">${pilha}</div>
+    ${compacto ? "" : quebra}
+    <div class="rx-2">${ranking("Tempo para direcionar · por gestor", "Da abertura (ou devolução) até direcionar, nas horas úteis do gestor.", "gestor", RESP.gestor[2], "Sem direcionamentos no período.")}
+    ${ranking("Tempo para confirmar · por técnico", "Da finalização até a confirmação, nas horas úteis de quem abriu a OS.", "tec", RESP.tec[2], "Sem confirmações no período.")}</div>
+    ${ranking("Tempo com cada manutentor", "Da OS chegar até finalizar (fila + deslocamento + material + serviço + pausas).", "manut", RESP.manut[2], "Sem atendimentos no período.")}
+    <p class="rx-nota">Horas úteis = expediente de cada pessoa (Controles → Horários). Emergência e Alta contam tempo corrido. Serviço, deslocamento e material contam o tempo real.</p>`;
+}
+
 async function viewRelatorios() {
   const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
   $("#view").innerHTML = `<div class="content">
@@ -1632,7 +1792,7 @@ async function gerarRelatorio() {
   const [rL, rT, rP, rO] = await Promise.all([todas(qL),
     todas(sb.from("os_atendimentos").select("*, ordens_servico(nucleo_id,prioridade,equipamento,descricao,galpoes)").gte("direcionada_em", antes).order("id")),
     todas(sb.from("os_pausas").select("*").gte("inicio", antes).order("id")),
-    todas(sb.from("ordens_servico").select("id,descricao,equipamento,galpoes,status,pausada_em,pausa_motivo").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).order("id"))]);
+    todas(sb.from("ordens_servico").select("id,descricao,equipamento,galpoes,status,pausada_em,pausa_motivo,solicitante_id").gte("aberta_em", ini0.toISOString()).lt("aberta_em", fim0.toISOString()).order("id"))]);
   if (tok !== S.tok) return;
   const err = rL.error || rT.error || rP.error; if (err) return toast(errMsg(err), true);
   const osInfo = Object.fromEntries(rO.data.map((o) => [o.id, o]));
@@ -1706,13 +1866,20 @@ async function gerarRelatorio() {
     const media = (fn) => f.reduce((s2, a) => s2 + fn(a), 0) / f.length;
     const des = media((a) => etapaAt(a.id, "DESLOCAMENTO")), mat = media((a) => etapaAt(a.id, "MATERIAL")), par = media((a) => pausaAt(a.id) - etapaAt(a.id));
     return { nome: u.nome, n: f.length, serv: media((a) => liq(a)), des, mat, par: Math.max(0, par) }; }).filter(Boolean);
+  // tempos por responsável (OS concluídas) e com quem estão as que seguem em aberto
+  const comInfo = (r) => ({ ...r, solicitante_id: r.solicitante_id ?? osInfo[r.id]?.solicitante_id });
+  R.respOS = L.filter((r) => r.status === "CONCLUÍDA").map((r) => ({ id: r.id, ...temposResp(comInfo(r), rT.data, rP.data) }));
+  R.resp = agregarResp(R.respOS);
+  const agoraISO = new Date().toISOString();
+  R.comQuem = Object.fromEntries(L.filter((r) => ABERTOS.includes(r.status)).map((r) => { const [papel, uid, desde] = comQuem(comInfo(r), rT.data);
+    return [r.id, { papel, uid, desde, min: ["EMERGENCIA", "ALTA"].includes(r.prioridade) ? (new Date() - new Date(desde)) / 6e4 : minUteis(uid, desde, agoraISO) }]; }));
   S.rel = R;
   desenharRelatorio(R);
 }
 
 function desenharRelatorio(R) {
-  const k = R.k;
-  const met = (l, v, nota, hot = false) => `<div class="rm${hot ? " hot" : ""}"><small>${l}</small><b>${v}</b><span>${nota}</span></div>`;
+  const k = R.k, soma = (arr, i) => arr.reduce((s2, l) => s2 + (+l[i] || 0), 0);
+  const ini2 = (n) => String(n).split(/\s+/).filter(Boolean).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
   const pbar = (p) => `<span class="pct"><span class="pbar"><i style="width:${p}%"></i></span>${p}%</span>`;
   const tabela = (tit, sub, cols, linhas, total, vazio = "Nada no período.") => `<section class="rel-bloco">
       <div class="rel-bh"><h3>${tit}</h3>${sub ? `<span>${sub}</span>` : ""}</div>
@@ -1720,66 +1887,117 @@ function desenharRelatorio(R) {
         <tbody>${linhas.map((l) => `<tr>${l.map((v, i) => `<td class="${cols[i][1] || ""}">${v}</td>`).join("")}</tr>`).join("")}</tbody>
         ${total ? `<tfoot><tr>${total.map((v, i) => `<td class="${cols[i][1] || ""}">${v}</td>`).join("")}</tr></tfoot>` : ""}</table></div>` : `<div class="rel-vazio">${vazio}</div>`}
     </section>`;
-  const soma = (arr, i) => arr.reduce((s2, l) => s2 + (+l[i] || 0), 0);
+  const hero = (rot, val, ctx, prog, alvo = "geral") => `<button class="rx-hero-c" data-ir="${alvo}"><small>${rot}</small><b>${val}</b><span>${ctx}</span>${prog != null ? `<div class="rx-prog"><i style="width:${Math.min(100, prog)}%"></i></div>` : ""}<em class="rx-ver">ver detalhes ›</em></button>`;
+  const mini = (rot, val, hot = false, alvo = "geral") => `<button class="rx-mini${hot ? " hot" : ""}" data-ir="${alvo}"><small>${rot}</small><b>${val}</b></button>`;
+  const sec = (n, tit, sub, corpo) => `<section class="rx-sec"><div class="rx-sec-h"><span class="rx-num">${n}</span><div><h3>${tit}</h3>${sub ? `<p>${sub}</p>` : ""}</div></div>${corpo}</section>`;
+  const pilha = (partes, h = 12) => { const t = partes.reduce((a, p) => a + p[0], 0) || 1; return `<div class="rx-pilha" style="height:${h}px">${partes.filter((p) => p[0] > 0).map(([v, c, rot]) => `<i style="flex:${v / t};background:${c}" title="${rot || ""}"></i>`).join("")}</div>`; };
+  const leg = (itens) => `<div class="rx-leg">${itens.map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join("")}</div>`;
+  const pServ = pct(Math.round(k.servico), Math.round(k.horas) || 1);
+  // 1. situação e classificação
+  const SIT = [["Concluídas", k.concl, "#1E8E4E"], ["Em andamento", k.andamento, "#E39A12"], ["Sem início", k.semInicio, "#DF2331"]];
+  const maxP = Math.max(1, ...R.porPrio.map((l) => l[1]));
+  const s1 = `<div class="rx-2">
+      <div class="rx-card"><h4>Situação das ${k.abertas} OS abertas no período</h4>${k.abertas ? pilha(SIT.map(([r, v, c]) => [v, c, r]), 18) : `<div class="rel-vazio">Nenhuma OS no período.</div>`}
+        <div class="rx-lst">${SIT.map(([r, v, c]) => `<div><i style="background:${c}"></i><span>${r}</span><b>${v}</b><em>${pct(v, k.abertas || 1)}%</em></div>`).join("")}</div></div>
+      <div class="rx-card"><h4>Por classificação</h4><div class="rx-rows">${R.porPrio.map((l) => `<div class="rx-row"><span class="rx-row-l">${sev(l[6])}</span>
+          <div class="rx-hb"><i style="width:${(l[1] / maxP) * 100}%;background:#E9E1D8"></i><i style="width:${(l[2] / maxP) * 100}%;background:#1E8E4E"></i></div>
+          <span class="rx-row-v"><b>${l[2]}/${l[1]}</b> concluídas</span><span class="rx-row-s">começa em ${fmtMin(l[4])}</span></div>`).join("") || `<div class="rel-vazio">Sem OS.</div>`}</div>
+        ${leg([["#1E8E4E", "Concluídas"], ["#E9E1D8", "Abertas no período"]])}</div></div>`;
+  // 2. onde o tempo foi gasto
+  const maxE = Math.max(1, ...R.etapasResumo.map((e) => e.media));
+  const s2 = R.etapas.length ? `<div class="rx-card">
+      ${pilha(R.etapasResumo.map((e, i) => [e.media, ETAPA_COR[i], e.rot]), 22)}
+      <div class="rx-pct">${R.etapasResumo.map((e, i) => e.media > 0 ? `<span style="flex:${e.media}">${e.pct >= 7 ? `<b style="color:${ETAPA_COR[i]}">${e.pct}%</b>` : ""}</span>` : "").join("")}</div>
+      <div class="rx-rows rx-et">${R.etapasResumo.map((e, i) => `<div class="rx-row"><span class="rx-row-l"><i class="rx-dot" style="background:${ETAPA_COR[i]}"></i><span class="rx-lab"><b>${ETAPA_CURTO[i].replace(/ \(.+\)/, "")}</b><small>${e.quem}</small></span></span>
+          <div class="rx-hb"><i style="width:${(e.media / maxE) * 100}%;background:${ETAPA_COR[i]}"></i></div><span class="rx-row-v"><b>${fmtMin(e.media)}</b></span><span class="rx-row-s">mediana ${fmtMin(e.mediana)}</span></div>`).join("")}</div>
+      <p class="rx-nota">Média de <b>${fmtMin(R.etapasTotal.media)}</b> da abertura até a confirmação, em ${R.etapasTotal.n} OS concluídas. A soma das etapas é o tempo total; nada é contado duas vezes.</p></div>`
+    : `<div class="rx-card"><div class="rel-vazio">Ainda não há OS <b>concluídas</b> no período. A divisão por etapa aparece quando a OS é confirmada.</div></div>`;
+  // 3. equipe
+  const s3 = R.porMnt.length ? `<div class="rx-equipe">${R.porMnt.map((l) => { const e = R.mntEtapas.find((x) => x.nome === l[0]);
+      return `<div class="rx-mnt"><div class="rx-mnt-h"><span class="avatar">${esc(ini2(l[0]))}</span><div><b>${esc(l[0])}</b><small>${l[1]} OS atendidas</small></div></div>
+        <div class="rx-mnt-n"><div><b>${fmtHoras(l[10])}</b><small>de serviço</small></div><div><b>${fmtMin(l[3])}</b><small>execução média</small></div><div><b>${fmtMin(l[4])}</b><small>resposta média</small></div></div>
+        ${e ? pilha(MNT_PARTES.map(([k2, rot, c]) => [e[k2], c, rot]), 10) : ""}
+        <div class="rx-mnt-f">${l[11] ? `<span class="tag ok">${fmtHoras(l[11])} em apoio</span>` : ""}${e ? `<span>Deslocamento ${fmtMin(e.des)} · material ${fmtMin(e.mat)} por OS</span>` : ""}${l[5] ? `<span class="tag bad">${l[5]} recusa(s)</span>` : ""}${l[6] ? `<span class="tag bad">${l[6]} não resolvida(s)</span>` : ""}</div></div>`; }).join("")}</div>
+      ${leg(MNT_PARTES.map(([, rot, c]) => [c, rot]))}
+      ${R.porAj.length ? `<div class="rx-card" style="margin-top:14px"><h4>Ajudantes (equipe de apoio) <em>${R.porAj.length}</em></h4><div class="rx-rows">${(() => { const mx = Math.max(1, ...R.porAj.map((l) => l[2]));
+        return R.porAj.map((l) => `<div class="rx-row"><span class="rx-row-l"><span class="rx-lab"><b>${esc(l[0])}</b><small>${l[1]} atendimento(s)</small></span></span><div class="rx-hb"><i style="width:${(l[2] / mx) * 100}%;background:#8B6F47"></i></div><span class="rx-row-v"><b>${fmtHoras(l[2])}</b></span><span class="rx-row-s">serviço ${fmtHoras(l[3])}</span></div>`).join(""); })()}</div></div>` : ""}
+      <p class="rx-nota"><b>Horas-homem: ${fmtHoras(k.horasHomem)}</b> = ${fmtHoras(k.horas)} dos responsáveis + ${fmtHoras(k.horasApoio || 0)} em apoio + ${fmtHoras(k.horasAj || 0)} dos ajudantes. Ninguém tem hora contada em dobro.</p>` : `<div class="rx-card"><div class="rel-vazio">Nenhum atendimento finalizado no período.</div></div>`;
+  // 4. granjas
+  const G = [...R.porGranja].sort((a, b) => b[1] - a[1]), maxG = Math.max(1, ...G.map((l) => l[1]));
+  const s4 = `<div class="rx-card"><div class="rx-rows">${G.map((l) => `<div class="rx-row"><span class="rx-row-l"><b>${esc(l[0])}</b></span>
+      <div class="rx-hb"><i style="width:${(l[1] / maxG) * 100}%;background:#F3C7C9"></i><i style="width:${(l[2] / maxG) * 100}%;background:#1E8E4E"></i></div>
+      <span class="rx-row-v"><b>${l[2]}/${l[1]}</b> · ${l[3]}%</span><span class="rx-row-s">${l[4] ? `${l[4]} em aberto` : "tudo concluído"}</span></div>`).join("") || `<div class="rel-vazio">Sem OS no período.</div>`}</div>
+    ${leg([["#1E8E4E", "Concluídas"], ["#F3C7C9", "Em aberto"]])}</div>`;
+  // 5. pontos de atenção
+  const P = R.pendentes.slice(0, 8), D = R.devolucoes.slice(0, 6);
+  const s5 = `<div class="rx-2">
+      <div class="rx-card"><h4>OS em aberto há mais tempo <em>${R.pendentes.length}</em></h4>${P.length ? `<div class="rx-lista">${P.map((l, i) => { const p = R.pendKeys[i] || {};
+        return `<div class="rx-li"><div><div class="rx-li-t"><span class="mono">${l[0]}</span>${sev(p.prio)}</div><b>${esc(l[4] || l[3])}</b><small>${esc(l[2])} · ${p.pausa ? "pausada" : esc(l[6].toLowerCase())}${l[7] !== "—" ? ` · ${esc(l[7])}` : ""}</small></div><span class="rx-idade">${l[8]}</span></div>`; }).join("")}</div>
+        ${R.pendentes.length > P.length ? `<p class="rx-nota">+${R.pendentes.length - P.length} no anexo.</p>` : ""}` : `<div class="rx-ok">${ic("check")}Todas as OS do período foram concluídas.</div>`}</div>
+      <div class="rx-card"><h4>Devoluções <em>${R.devolucoes.length}</em></h4>${D.length ? `<div class="rx-lista">${D.map((l) => `<div class="rx-li"><div><div class="rx-li-t"><span class="mono">${l[0]}</span><span class="tag bad">${l[2]}</span></div><b>${esc(l[5] !== "—" ? l[5] : l[4])}</b><small>${esc(l[3])} · ${l[1]}</small></div></div>`).join("")}</div>
+        ${R.devolucoes.length > D.length ? `<p class="rx-nota">+${R.devolucoes.length - D.length} no anexo.</p>` : ""}` : `<div class="rx-ok">${ic("check")}Nenhuma devolução no período.</div>`}</div></div>`;
+  const s5b = R.canceladas.length ? `<div class="rx-card" style="margin-top:14px"><h4>Canceladas <em>${R.canceladas.length}</em> <small style="font-weight:500;color:var(--muted)">fora dos indicadores</small></h4><div class="rx-lista">${R.canceladas.slice(0, 5).map((l) => `<div class="rx-li"><div><div class="rx-li-t"><span class="mono">${l[0]}</span><span class="tag">${esc(l[3])}</span></div><b>${esc(l[5])}</b><small>Cancelada por ${esc(l[2])} · ${l[1]}${l[4] !== "—" ? ` · ${esc(l[4])}` : ""}</small></div></div>`).join("")}</div>${R.canceladas.length > 5 ? `<p class="rx-nota">+${R.canceladas.length - 5} no anexo.</p>` : ""}</div>` : "";
   const totG = [soma(R.porGranja, 1), soma(R.porGranja, 2), soma(R.porGranja, 4)];
-  $("#rInfo").textContent = R.filtros[0][1];
-  $("#relOut").innerHTML = `<div class="rel-doc">
-    <header class="rel-cab">
-      <div><small>Relatório de manutenção das granjas</small><h2>${esc(R.rotPer)}</h2><p>${dataBR(R.ini0)} a ${dataBR(new Date(R.fim0 - 1))}</p></div>
-      <div class="rel-chips">${R.filtros.slice(1).map(([a, b]) => `<span><em>${a}</em>${esc(b)}</span>`).join("")}</div>
-    </header>
-    <div class="rel-paineis">
-      <section class="rel-painel"><h4>${ic("list")}Volume de OS</h4><div class="rel-met">
-        ${met("Abertas no período", k.abertas, "total de OS abertas")}
-        ${met("Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas} concluídas`)}
-        ${met("Não atendidas", k.pend, `${k.semInicio} sem início · ${k.andamento} em andamento`, k.semInicio > 0)}
-        ${met("Devolvidas", k.devol, `${k.recusas} recusadas · ${k.naoRes} não resolvidas${k.admin ? ` · ${k.admin} pelo admin` : ""}`, k.devol > 0)}</div></section>
-      <section class="rel-painel"><h4>${ic("clock")}Tempo e horas</h4><div class="rel-met">
-        ${met("Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atendimentos finalizados`)}
-        ${met("Horas-homem", fmtHoras(k.horasHomem), `${fmtHoras(k.horas)} dos líderes + ${fmtHoras(k.horasApoio)} em apoio + ${fmtHoras(k.horasAj)} dos ajudantes · ${k.comEquipe} atendimento(s) com equipe`)}
-        ${met("Horas de serviço (execução)", fmtHoras(k.servico), `só o serviço de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}% das horas`)}
-        ${met("Deslocamento · material", `${fmtHoras(k.desloc)} · ${fmtHoras(k.material)}`, "fora do tempo de serviço")}
-        ${met("Execução média por atendimento", fmtMin(k.medio), "sem deslocamento, material e pausas")}
-        ${met("Resposta média", fmtMin(k.resposta), "do direcionamento ao início")}
-        ${met("Lead médio", fmtMin(k.lead), "da abertura à confirmação")}</div></section>
-    </div>
-    <div class="rel-graf">
-      <section><h4>Situação das OS do período</h4>${donutBloco([{ l: "Concluídas", v: k.concl, c: "#1E8E4E" }, { l: "Em andamento", v: k.andamento, c: "#E8A317" }, { l: "Sem início", v: k.semInicio, c: "#DF2331" }], { centro: k.abertas, sub: "OS abertas", tam: 150, esp: 18 })}</section>
-      <section><h4>Finalização</h4>${medidor(k.pct, { rot: `${k.concl} de ${k.abertas} OS`, cor: k.pct >= 80 ? "#1E8E4E" : k.pct >= 60 ? "#E8A317" : "#DF2331" })}</section>
-      <section><h4>Horas trabalhadas por manutentor</h4>${R.porMnt.length ? barras(R.porMnt.map((l) => ({ l: esc(l[0]), v: l[2], txt: fmtHoras(l[2]), c: "#DF2331" })), Math.max(1, ...R.porMnt.map((l) => l[2]))) : `<div class="zero">Sem atendimentos.</div>`}</section>
-    </div>
-    ${!R.etapas.length ? `<section class="rel-bloco"><div class="rel-bh"><h3>Onde o tempo foi gasto</h3></div><div class="rel-vazio">Ainda não há OS <b>concluídas</b> no período. A divisão por etapa aparece quando a OS é confirmada pelo técnico (ou pelo gestor, na preventiva). O tempo de serviço dos atendimentos finalizados já aparece nos indicadores acima e na tabela por manutentor.</div></section>` : ""}
-    ${R.etapas.length ? `<section class="rel-bloco"><div class="rel-bh"><h3>Onde o tempo foi gasto</h3><span>${R.etapasTotal.n} OS concluídas · média por OS · a soma das etapas é o tempo total</span></div>
-      <div class="etapa-barra">${R.etapasResumo.filter((e) => e.media > 0).map((e, i) => `<i style="flex:${e.media};background:${ETAPA_COR[R.etapasResumo.indexOf(e)]}" title="${e.rot}: ${fmtMin(e.media)}"></i>`).join("")}</div>
-      <div class="etapa-leg">${R.etapasResumo.map((e, i) => `<span><i style="background:${ETAPA_COR[i]}"></i>${ETAPA_CURTO[i]} <b>${e.pct}%</b></span>`).join("")}</div>
-      ${R.mntEtapas.length ? (() => { const mx = Math.max(...R.mntEtapas.map((x) => x.serv + x.des + x.mat + x.par), 1);
-        return `<h4 class="etapa-sub">Tempo do manutentor por atendimento (média)</h4><div class="mnt-barras">${R.mntEtapas.map((x) => `<div class="mb-l"><span>${esc(x.nome)}</span><div class="mb-t">${MNT_PARTES.map(([k2, rot, c]) => x[k2] > 0 ? `<i style="width:${(x[k2] / mx) * 100}%;background:${c}" title="${rot}: ${fmtMin(x[k2])}"></i>` : "").join("")}</div><b>${fmtMin(x.serv + x.des + x.mat + x.par)}</b></div>`).join("")}</div>
-        <div class="etapa-leg">${MNT_PARTES.map(([k2, rot, c]) => `<span><i style="background:${c}"></i>${rot}</span>`).join("")}</div>`; })() : ""}
-      <div class="tscroll"><table class="rt"><thead><tr><th>Etapa</th><th>Quem está com a OS</th><th class="n">Média por OS</th><th class="n">Mediana</th><th class="n">% do tempo total</th></tr></thead><tbody>
-      ${R.etapasResumo.map((e, i) => `<tr><td><i class="etapa-cor" style="background:${ETAPA_COR[i]}"></i><b>${e.rot}</b></td><td>${e.quem}</td><td class="n">${fmtMin(e.media)}</td><td class="n">${fmtMin(e.mediana)}</td><td class="n">${e.pct}%</td></tr>`).join("")}</tbody>
-      <tfoot><tr><td><b>Tempo total (da abertura até a confirmação)</b></td><td></td><td class="n"><b>${fmtMin(R.etapasTotal.media)}</b></td><td class="n"><b>${fmtMin(R.etapasTotal.mediana)}</b></td><td class="n">100%</td></tr></tfoot></table></div></section>
-    ${tabela("Tempo por etapa em cada OS", `OS concluídas no período${R.etapas.length > 40 ? " · 40 mais recentes (todas no PDF e no Excel)" : ""}`, [["OS"], ["Onde"], ["Encaminhar", "n"], ["Fila", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço", "n"], ["Pausas", "n"], ["Confirmar", "n"], ["Total", "n"]],
-      R.etapas.slice(0, 40).map((x) => [`<b>${osId(x.id)}</b>${x.ciclos > 1 ? ` <small class="muted">${x.ciclos} atend.</small>` : ""}`, `${esc(nomeN(x.nuc))} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), `<b>${fmtMin(x.serv)}</b>`, fmtMin(x.par), fmtMin(x.tec), `<b>${fmtMin(x.total)}</b>`]))}` : ""}
+  const anexo = `<details class="rx-anexo"><summary>${ic("list")}Anexo · tabelas detalhadas <small>(as mesmas do Excel)</small></summary>
     ${tabela("Ajudantes (equipe de apoio)", "mesmas horas dos atendimentos finalizados em que estavam com o líder", [["Ajudante"], ["Atendimentos", "n"], ["Horas", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"]],
       R.porAj.map((l) => [`<b>${esc(l[0])}</b>`, l[1], `<b>${fmtHoras(l[2])}</b>`, fmtHoras(l[3]), fmtMin(l[4]), fmtMin(l[5])]), null, "Nenhum atendimento com ajudantes no período.")}
     ${tabela("Por manutentor", "atendimentos finalizados no período", [["Manutentor"], ["OS atendidas", "n"], ["Horas trab.", "n"], ["Em apoio", "n"], ["Serviço", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço médio", "n"], ["Resposta média", "n"], ["Recusas", "n"], ["Não resolvidas", "n"], ["Tempo parado", "n"]],
       R.porMnt.map((l) => [`<b>${esc(l[0])}</b>`, l[1], fmtHoras(l[2]), fmtHoras(l[11]), `<b>${fmtHoras(l[10])}</b>`, fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5] || "—", l[6] || "—", fmtMin(l[7])]),
       R.porMnt.length > 1 ? ["Equipe", soma(R.porMnt, 1), fmtHoras(soma(R.porMnt, 2)), fmtHoras(soma(R.porMnt, 11)), fmtHoras(soma(R.porMnt, 10)), fmtMin(soma(R.porMnt, 8)), fmtMin(soma(R.porMnt, 9)), fmtMin(k.medio), fmtMin(k.resposta), soma(R.porMnt, 5), soma(R.porMnt, 6), fmtMin(soma(R.porMnt, 7))] : null)}
-    <div class="rel-2">
-      ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
-        R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]),
-        R.porGranja.length > 1 ? ["Total", totG[0], totG[1], pbar(pct(totG[1], totG[0])), totG[2], fmtMin(k.medio)] : null)}
-      ${tabela("Por classificação", "tempos em média", [["Classificação"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Até começar", "n"], ["Lead médio", "n"]],
-        R.porPrio.map((l) => [sev(l[6]), l[1], l[2], pbar(l[3]), fmtMin(l[4]), fmtMin(l[5])]))}
-    </div>
+    ${tabela("Por granja", "OS abertas no período", [["Granja"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Não atend.", "n"], ["Tempo médio", "n"]],
+      R.porGranja.map((l) => [`<b>${esc(l[0])}</b>`, l[1], l[2], pbar(l[3]), l[4] || "—", fmtMin(l[5])]), R.porGranja.length > 1 ? ["Total", totG[0], totG[1], pbar(pct(totG[1], totG[0])), totG[2], fmtMin(k.medio)] : null)}
+    ${tabela("Por classificação", "tempos em média", [["Classificação"], ["Abertas", "n"], ["Concluídas", "n"], ["Finalização", "n"], ["Até começar", "n"], ["Lead médio", "n"]], R.porPrio.map((l) => [sev(l[6]), l[1], l[2], pbar(l[3]), fmtMin(l[4]), fmtMin(l[5])]))}
+    ${R.etapas.length ? tabela("Tempo por etapa em cada OS", "OS concluídas no período", [["OS"], ["Onde"], ["Encaminhar", "n"], ["Fila", "n"], ["Deslocamento", "n"], ["Material", "n"], ["Serviço", "n"], ["Pausas", "n"], ["Confirmar", "n"], ["Total", "n"]],
+      R.etapas.map((x) => [`<b>${osId(x.id)}</b>`, `${esc(nomeN(x.nuc))} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), `<b>${fmtMin(x.serv)}</b>`, fmtMin(x.par), fmtMin(x.tec), `<b>${fmtMin(x.total)}</b>`])) : ""}
     ${tabela("OS não atendidas", `${R.pendentes.length} OS · da mais antiga para a mais nova`, [["OS"], ["Aberta há", "n"], ["Onde"], ["Equipamento"], ["Serviço", "wide"], ["Classificação"], ["Situação"], ["Manutentor"]],
-      R.pendentes.map((l, i) => { const p = R.pendKeys[i] || {}; return [`<span class="mono">${l[0]}</span>`, l[8], esc(l[2]), esc(l[3]), esc(l[4]), sev(p.prio),
-        p.pausa ? `<span class="st pausa">${ic("pause")}Pausada</span>` : stTag(p.status), esc(l[7])]; }), null, "Todas as OS do período foram concluídas.")}
-    ${tabela("Canceladas", `${R.canceladas.length} no período · fora dos indicadores acima`, [["OS"], ["Quando"], ["Por"], ["Motivo"], ["Observação", "wide"], ["Serviço", "wide"]], R.canceladas.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], esc(l[2]), esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma OS cancelada no período.")}
+      R.pendentes.map((l, i) => { const p = R.pendKeys[i] || {}; return [`<span class="mono">${l[0]}</span>`, l[8], esc(l[2]), esc(l[3]), esc(l[4]), sev(p.prio), p.pausa ? `<span class="st pausa">${ic("pause")}Pausada</span>` : stTag(p.status), esc(l[7])]; }), null, "Todas as OS do período foram concluídas.")}
+    ${tabela("Canceladas", `${R.canceladas.length} no período · fora dos indicadores`, [["OS"], ["Quando"], ["Por"], ["Motivo"], ["Observação", "wide"], ["Serviço", "wide"]], R.canceladas.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], esc(l[2]), esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma OS cancelada no período.")}
     ${tabela("Devoluções", `${R.devolucoes.length} no período`, [["OS"], ["Quando"], ["Tipo"], ["Manutentor"], ["Serviço", "wide"], ["Motivo", "wide"]],
-      R.devolucoes.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], `<span class="tag bad">${l[2]}</span>`, esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma devolução no período.")}
-    <p class="rel-nota">Horas trabalhadas = registradas no sistema (Iniciar → Finalizar, menos pausas). OS e percentuais consideram as OS abertas no período; horas e tempos, os atendimentos finalizados no período.</p>
+      R.devolucoes.map((l) => [`<span class="mono">${l[0]}</span>`, l[1], `<span class="tag bad">${l[2]}</span>`, esc(l[3]), esc(l[4]), esc(l[5])]), null, "Nenhuma devolução no período.")}</details>`;
+  // pendências: com quem está cada OS em aberto
+  const PC = { gestor: [], manut: [], tec: [] }; R.pendKeys.forEach((p) => { const c = R.comQuem[p.id]; if (c) PC[c.papel].push(c); });
+  const pendHtml = `<div class="rsp-grid">${["gestor", "manut", "tec"].map((kk) => `<div class="rsp-c" style="--rc:${RESP[kk][2]}"><small>Com o ${RESP[kk][0].toLowerCase()}</small><b>${PC[kk].length} OS</b><span>${PC[kk].length ? `mais antiga há ${fmtMin(Math.max(...PC[kk].map((c) => c.min)))} úteis` : "nenhuma"}</span></div>`).join("")}</div>
+    <div class="rx-card"><h4>OS em aberto <em>${R.pendentes.length}</em></h4>${R.pendentes.length ? `<div class="rx-lista">${R.pendentes.map((l, i) => { const p = R.pendKeys[i] || {}, c = R.comQuem[p.id];
+      return `<div class="rx-li"><div><div class="rx-li-t"><span class="mono">${l[0]}</span>${sev(p.prio)}</div><b>${esc(l[4] || l[3])}</b><small>${esc(l[2])} · aberta ${l[1]}</small></div>
+        ${c ? `<div class="cq" style="--rc:${RESP[c.papel][2]}"><small>Está com</small><b>${c.papel === "gestor" ? "Gestor" : esc(nomeU(c.uid))}</b><em>há ${fmtMin(c.min)}</em></div>` : ""}</div>`; }).join("")}</div>` : `<div class="rx-ok">${ic("check")}Todas as OS do período foram concluídas.</div>`}</div>`;
+  const devHtml = `<div class="rx-card"><h4>Devoluções <em>${R.devolucoes.length}</em></h4>${R.devolucoes.length ? `<div class="rx-lista">${R.devolucoes.map((l) => `<div class="rx-li"><div><div class="rx-li-t"><span class="mono">${l[0]}</span><span class="tag bad">${l[2]}</span></div><b>${esc(l[5] !== "—" ? l[5] : l[4])}</b><small>${esc(l[3])} · ${l[1]}</small></div></div>`).join("")}</div>` : `<div class="rx-ok">${ic("check")}Nenhuma devolução no período.</div>`}</div>`;
+  const TABS = [["geral", "Visão geral", "chart"], ["resp", "Tempos por responsável", "clock"], ["equipe", "Equipe", "users"], ["granjas", "Granjas", "pin"], ["pend", "Pendências", "alert"], ["canc", "Devoluções e canceladas", "undo"], ["tab", "Tabelas", "list"]];
+  const A = R.resp.media, totA = A.total || 1;
+  $("#rInfo").textContent = R.filtros[0][1];
+  $("#relOut").innerHTML = `<div class="rel-doc rx">
+    <header class="rel-cab rx-cab">
+      <div><small>Relatório de manutenção das granjas</small><h2>${esc(R.rotPer)}</h2><p>${dataBR(R.ini0)} a ${dataBR(new Date(R.fim0 - 1))}</p></div>
+      <div class="rel-chips">${R.filtros.slice(1).map(([a, b]) => `<span><em>${a}</em>${esc(b)}</span>`).join("")}</div>
+    </header>
+    <nav class="rx-tabs" id="rxTabs">${TABS.map(([p, r, i]) => `<button data-p="${p}" aria-pressed="false">${ic(i)}<span>${r}</span></button>`).join("")}</nav>
+    <div class="rx-corpo">
+      <div class="rx-pane" data-p="geral">
+        <div class="rx-hero">
+          ${hero("OS no período", k.abertas, `${k.concl} concluídas · ${k.pend} em aberto`, k.pct, "granjas")}
+          ${hero("Horas de serviço", fmtHoras(k.servico), `de ${fmtHoras(k.horas)} trabalhadas (${pServ}%)`, pServ, "equipe")}
+          ${hero("Execução média", fmtMin(k.medio), "por atendimento, só o serviço de fato", null, "equipe")}
+          ${hero("Tempo até a conclusão", fmtMin(A.total || k.lead), "média por OS, por responsável →", null, "resp")}
+        </div>
+        <div class="rx-strip">
+          ${mini("Concluídas", `${k.pct}%`, false, "granjas")}${mini("Sem início", k.semInicio, k.semInicio > 0, "pend")}${mini("Devolvidas", k.devol, k.devol > 0, "canc")}${mini("Canceladas", R.canceladas.length, false, "canc")}
+          ${mini("Deslocamento", fmtHoras(k.desloc), false, "equipe")}${mini("Busca de material", fmtHoras(k.material), false, "equipe")}${mini("Tempo parado", fmtHoras(k.parado), false, "equipe")}${mini("Horas-homem", fmtHoras(k.horasHomem), false, "equipe")}
+        </div>
+        ${sec(1, "Com quem o tempo ficou", "Média por OS concluída. Toque para ver por pessoa.", R.resp.n ? `<div class="rsp-grid">${["gestor", "manut", "tec"].map((kk) => `<button class="rsp-c" data-ir="resp" style="--rc:${RESP[kk][2]}"><small>${RESP[kk][0]}</small><b>${fmtMin(A[kk])}</b><span>${RESP[kk][1]}</span><div class="rsp-bar"><i style="width:${Math.round((A[kk] / totA) * 100)}%"></i></div><em>${Math.round((A[kk] / totA) * 100)}% do tempo total</em></button>`).join("")}</div>` : `<div class="rx-card"><div class="rel-vazio">Sem OS concluídas no período.</div></div>`)}
+        ${sec(2, "Situação das OS", "Como estão as OS abertas no período e como foram classificadas.", s1)}
+      </div>
+      <div class="rx-pane" data-p="resp" hidden>${sec(1, "Tempos por responsável", "Quanto tempo a OS ficou com o gestor, com o manutentor e com o técnico.", htmlResp(R.resp))}${sec(2, "Etapas da OS", "Da abertura até a confirmação, etapa por etapa (média por OS concluída).", s2)}</div>
+      <div class="rx-pane" data-p="equipe" hidden>${sec(1, "Equipe", "Horas de serviço de fato e como o tempo de cada manutentor se divide.", s3)}</div>
+      <div class="rx-pane" data-p="granjas" hidden>${sec(1, "Granjas", "OS abertas e concluídas em cada granja.", s4)}</div>
+      <div class="rx-pane" data-p="pend" hidden>${sec(1, "Pendências", "OS do período que ainda não foram concluídas e com quem cada uma está agora.", pendHtml)}</div>
+      <div class="rx-pane" data-p="canc" hidden>${sec(1, "Devoluções e canceladas", "O que voltou para o gestor e o que foi cancelado (canceladas ficam fora dos indicadores).", devHtml + s5b)}</div>
+      <div class="rx-pane" data-p="tab" hidden>${anexo.replace('<details class="rx-anexo">', '<details class="rx-anexo" open>')}</div>
+      <p class="rel-nota">Tempos por responsável em horas úteis do expediente de cada pessoa (Emergência e Alta: corrido). Horas-homem = responsáveis + líderes de apoio (só enquanto apoiaram) + ajudantes. Canceladas ficam fora dos indicadores. Horas de serviço = execução de fato.</p>
+    </div>
   </div>`;
+  const irAba = (p) => { S.relAba = p; $$("#rxTabs button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.p === p)); $$("#relOut .rx-pane").forEach((x) => (x.hidden = x.dataset.p !== p)); };
+  $("#rxTabs").onclick = (e) => { const b = e.target.closest("[data-p]"); if (b) irAba(b.dataset.p); };
+  $("#relOut").onclick = (e) => { const c = e.target.closest("[data-ir]"); if (!c || e.target.closest("#rxTabs")) return; irAba(c.dataset.ir); $("#rxTabs").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  irAba(S.relAba || "geral");
 }
 
 // Salvar arquivo: no iPhone/iPad (principalmente com o app instalado) abre o "Compartilhar" → Salvar em Arquivos;
@@ -1812,88 +2030,144 @@ async function exportarPDF() {
   await carregarScript("jspdf.umd.min.js", () => window.jspdf);
   await carregarScript("jspdf.plugin.autotable.min.js", () => window.jspdf?.jsPDF?.API?.autoTable);
   const R = S.rel, k = R.k, { jsPDF } = window.jspdf, doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
-  const W = 210, M = 14, VERM = [223, 35, 49], TINTA = [34, 27, 23], CINZA = [124, 113, 105], VINHO = [126, 12, 22], OURO = [242, 181, 27];
+  const W = 210, M = 14, CW = W - 2 * M, VERM = [223, 35, 49], TINTA = [34, 27, 23], CINZA = [124, 113, 105], VINHO = [126, 12, 22], OURO = [242, 181, 27], LINHA = [230, 224, 216], TRILHO = [242, 237, 231];
   const logo = await logoDataURL();
-  // cabeçalho
-  doc.setFillColor(...VINHO); doc.rect(0, 0, W, 30, "F");
-  doc.setFillColor(...OURO); doc.rect(0, 30, W, 1.2, "F");
-  doc.addImage(logo, "PNG", M, 6.5, 34, 17);
-  doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(15);
-  doc.text("Relatório de Manutenção das Granjas", 54, 14);
-  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(210, 212, 216);
-  doc.text(`${C.NOME_EMPRESA} · ${R.filtros[0][1]}`, 54, 20.5);
-  doc.text(`Gerado em ${new Date().toLocaleString("pt-BR", { timeZone: TZ })} por ${S.eu.nome}`, 54, 25.5);
-  // filtros
-  let y = 39; doc.setTextColor(...CINZA); doc.setFontSize(8.5);
-  doc.text(R.filtros.slice(1).map(([a, b]) => `${a}: ${b}`).join("     "), M, y);
-  // indicadores (2 linhas x 4)
-  const kp = [["OS abertas", String(k.abertas), "no período"], ["Finalizadas", `${k.pct}%`, `${k.concl} de ${k.abertas}`], ["Não atendidas", String(k.pend), `${k.semInicio} sem início`],
-    ["Devolvidas", String(k.devol), `${k.recusas} rec. · ${k.naoRes} não res.`],
-    ["Horas trabalhadas", fmtHoras(k.horas), `${k.atendidas} atend. · ${fmtHoras(k.horasHomem)} horas-homem`], ["Horas de serviço", fmtHoras(k.servico), `execução de fato · ${pct(Math.round(k.servico), Math.round(k.horas) || 1)}%`],
-    ["Deslocamento", fmtHoras(k.desloc), "fora do tempo de serviço"], ["Busca de material", fmtHoras(k.material), "fora do tempo de serviço"],
-    ["Execução média", fmtMin(k.medio), "por atendimento, só serviço"], ["Resposta média", fmtMin(k.resposta), "do direcionamento ao início"],
-    ["Lead médio", fmtMin(k.lead), "da abertura à confirmação"], ["Tempo parado", fmtHoras(k.parado), "pausas (almoço, peça...)"]];
-  y += 5; const bw = (W - 2 * M - 9) / 4, bh = 19;
-  kp.forEach(([l, v, s2], i) => { const x = M + (i % 4) * (bw + 3), yy = y + Math.floor(i / 4) * (bh + 3);
-    doc.setDrawColor(226, 226, 222); doc.setFillColor(250, 250, 249); doc.roundedRect(x, yy, bw, bh, 2, 2, "FD");
-    doc.setFontSize(7.5); doc.setTextColor(...CINZA); doc.text(l, x + 3, yy + 5);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(...((l === "Não atendidas" && k.semInicio) || (l === "Devolvidas" && k.devol) ? VERM : TINTA)); doc.text(v, x + 3, yy + 12);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...CINZA); doc.text(s2, x + 3, yy + 16.5); });
-  y += 3 * bh + 13;
-  const secao = (tit, head, body, cols = {}) => {
-    if (y > 260) { doc.addPage(); y = 18; }
-    doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(tit, M, y);
-    doc.autoTable({ startY: y + 2.5, head: [head], body: body.length ? body : [[{ content: "Nada no período.", colSpan: head.length, styles: { halign: "center", textColor: CINZA } }]], margin: { left: M, right: M },
-      styles: { font: "helvetica", fontSize: 8, cellPadding: 1.8, textColor: TINTA, lineColor: [230, 230, 226], lineWidth: 0.1 },
+  let y = 0;
+  const T = (txt, x, yy, o = {}) => { doc.setFont("helvetica", o.b ? "bold" : "normal"); doc.setFontSize(o.s || 8); doc.setTextColor(...(o.c || TINTA)); doc.text(txt, x, yy, o.al ? { align: o.al } : undefined); };
+  const novaPag = () => { doc.addPage(); y = 18; };
+  const cabe = (h) => { if (y + h > 280) novaPag(); };
+  const secTit = (n, tit, sub) => { cabe(30); doc.setFillColor(...VERM); doc.circle(M + 3.2, y - 1.4, 3.2, "F"); T(String(n), M + 3.2, y - 0.1, { s: 8.5, b: true, c: [255, 255, 255], al: "center" });
+    T(tit, M + 9, y, { s: 12.5, b: true }); if (sub) T(sub, M + 9, y + 4.8, { s: 7.8, c: CINZA }); y += sub ? 10.5 : 7.5; };
+  const pilha = (x, yy, w, h, partes) => { const tot = partes.reduce((a, p) => a + p[0], 0); doc.setFillColor(...TRILHO); doc.rect(x, yy, w, h, "F"); if (!tot) return; let cx = x;
+    partes.forEach(([v, cor]) => { const ww = (v / tot) * w; if (ww <= 0) return; doc.setFillColor(...rgb(cor)); doc.rect(cx, yy, ww, h, "F"); cx += ww; }); };
+  const hb = (x, yy, w, h, partes) => { doc.setFillColor(...TRILHO); doc.roundedRect(x, yy, w, h, h / 2, h / 2, "F");
+    partes.forEach(([f, cor]) => { const ww = Math.max(0, Math.min(1, f)) * w; if (ww > 0.3) { doc.setFillColor(...rgb(cor)); doc.roundedRect(x, yy, ww, h, h / 2, h / 2, "F"); } }); };
+  const legenda = (x, yy, itens, passo) => { itens.forEach(([cor, txt], i) => { const cx = x + i * passo; doc.setFillColor(...rgb(cor)); doc.rect(cx, yy - 2.5, 2.8, 2.8, "F"); T(txt, cx + 4, yy, { s: 7.5 }); }); };
+  const cartao = (x, yy, w, h) => { doc.setDrawColor(...LINHA); doc.setLineWidth(0.25); doc.setFillColor(255, 255, 255); doc.roundedRect(x, yy, w, h, 2.5, 2.5, "FD"); };
+  const tabela = (tit, head, body, cols = {}) => {
+    cabe(24); if (tit) { T(tit, M, y, { s: 10, b: true }); y += 2.5; }
+    doc.autoTable({ startY: y, head: [head], body: body.length ? body : [[{ content: "Nada no período.", colSpan: head.length, styles: { halign: "center", textColor: CINZA } }]], margin: { left: M, right: M },
+      styles: { font: "helvetica", fontSize: 7.8, cellPadding: 1.7, textColor: TINTA, lineColor: LINHA, lineWidth: 0.1 },
       headStyles: { fillColor: VINHO, textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [251, 248, 244] }, columnStyles: cols });
-    y = doc.lastAutoTable.finalY + 9;
-  };
-  const num = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, { halign: "right" }]));
-  if (!R.etapas.length) { doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text("Onde o tempo foi gasto", M, y);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(...CINZA); doc.text("Ainda não há OS concluídas no período. A divisão por etapa aparece quando a OS é confirmada.", M, y + 5); y += 13; }
+    y = doc.lastAutoTable.finalY + 8; };
+  const dir = (...ix) => Object.fromEntries(ix.map((i) => [i, { halign: "right" }]));
+
+  // ---------- cabeçalho
+  doc.setFillColor(...VINHO); doc.rect(0, 0, W, 34, "F"); doc.setFillColor(...OURO); doc.rect(0, 34, W, 1.3, "F");
+  doc.addImage(logo, "PNG", M, 8, 36, 18);
+  T("RELATÓRIO DE MANUTENÇÃO DAS GRANJAS", 56, 12.5, { s: 8, b: true, c: [246, 210, 122] });
+  T(R.rotPer, 56, 20, { s: 17, b: true, c: [255, 255, 255] });
+  T(`${dataBR(R.ini0)} a ${dataBR(new Date(R.fim0 - 1))} · ${C.NOME_EMPRESA}`, 56, 26.5, { s: 9, c: [232, 214, 214] });
+  T(`Gerado em ${new Date().toLocaleString("pt-BR", { timeZone: TZ })} por ${S.eu.nome}`, 56, 31, { s: 7.5, c: [205, 180, 180] });
+  y = 42; T(R.filtros.slice(1).map(([a, b]) => `${a}: ${b}`).join("     "), M, y, { s: 8, c: CINZA }); y += 6;
+
+  // ---------- destaques
+  const pServ = pct(Math.round(k.servico), Math.round(k.horas) || 1);
+  const HERO = [["OS NO PERÍODO", String(k.abertas), `${k.concl} concluídas · ${k.pend} em aberto`, k.pct], ["HORAS DE SERVIÇO", fmtHoras(k.servico), `de ${fmtHoras(k.horas)} trabalhadas (${pServ}%)`, pServ],
+    ["EXECUÇÃO MÉDIA", fmtMin(k.medio), "por atendimento, só o serviço", null], ["TEMPO ATÉ A CONCLUSÃO", fmtMin(k.lead), "média da abertura à confirmação", null]];
+  const hw = (CW - 9) / 4, hh = 30;
+  HERO.forEach(([l, v, ctx, prog], i) => { const x = M + i * (hw + 3); cartao(x, y, hw, hh);
+    T(l, x + 4, y + 6, { s: 6.8, b: true, c: CINZA }); T(v, x + 4, y + 16, { s: 18, b: true }); doc.setFont("helvetica", "normal"); doc.setFontSize(7.2); T(doc.splitTextToSize(ctx, hw - 8).slice(0, prog != null ? 1 : 2), x + 4, y + 21.5, { s: 7.2, c: CINZA });
+    if (prog != null) hb(x + 4, y + 24.5, hw - 8, 2, [[prog / 100, "#1E8E4E"]]); });
+  y += hh + 4;
+  const MINI = [["Concluídas", `${k.pct}%`], ["Sem início", String(k.semInicio), k.semInicio > 0], ["Devolvidas", String(k.devol), k.devol > 0], ["Resposta média", fmtMin(k.resposta)],
+    ["Deslocamento", fmtHoras(k.desloc)], ["Material", fmtHoras(k.material)], ["Tempo parado", fmtHoras(k.parado)], ["Horas-homem", fmtHoras(k.horasHomem)]];
+  const mw = CW / MINI.length; doc.setFillColor(250, 248, 245); doc.setDrawColor(...LINHA); doc.roundedRect(M, y, CW, 13, 2, 2, "FD");
+  MINI.forEach(([l, v, hot], i) => { const x = M + i * mw; if (i) { doc.setDrawColor(...LINHA); doc.line(x, y + 2, x, y + 11); }
+    T(l, x + 3, y + 4.8, { s: 6.6, c: CINZA }); T(v, x + 3, y + 10.3, { s: 10, b: true, c: hot ? VERM : TINTA }); });
+  y += 21;
+
+  // ---------- 1. situação
+  secTit(1, "Situação das OS", "Como estão as OS abertas no período e como foram classificadas.");
+  const colW = (CW - 6) / 2, y0 = y, ch = 46; cartao(M, y, colW, ch); cartao(M + colW + 6, y, colW, ch);
+  T(`Situação das ${k.abertas} OS abertas`, M + 4, y + 6, { s: 8.5, b: true });
+  const SIT = [["Concluídas", k.concl, "#1E8E4E"], ["Em andamento", k.andamento, "#E39A12"], ["Sem início", k.semInicio, "#DF2331"]];
+  pilha(M + 4, y + 10, colW - 8, 6, SIT.map(([, v, c]) => [v, c]));
+  SIT.forEach(([r, v, c], i) => { const yy = y + 24 + i * 6.5; doc.setFillColor(...rgb(c)); doc.rect(M + 4, yy - 2.6, 2.8, 2.8, "F"); T(r, M + 9, yy, { s: 8.2 });
+    T(String(v), M + colW - 22, yy, { s: 8.5, b: true, al: "right" }); T(`${pct(v, k.abertas || 1)}%`, M + colW - 4, yy, { s: 8, c: CINZA, al: "right" }); });
+  const xr = M + colW + 6; T("Por classificação", xr + 4, y + 6, { s: 8.5, b: true });
+  const maxP = Math.max(1, ...R.porPrio.map((l) => l[1]));
+  R.porPrio.slice(0, 5).forEach((l, i) => { const yy = y + 13 + i * 6.6; T(l[0], xr + 4, yy, { s: 7.8, b: true, c: l[6] === "EMERGENCIA" ? VERM : TINTA });
+    hb(xr + 30, yy - 2.3, colW - 78, 2.6, [[l[1] / maxP, "#E5DCD2"], [l[2] / maxP, "#1E8E4E"]]); T(`${l[2]}/${l[1]}`, xr + colW - 31, yy, { s: 7.8, b: true, al: "right" });
+    T(`início ${fmtMin(l[4])}`, xr + colW - 3.5, yy, { s: 6.4, c: CINZA, al: "right" }); });
+  y = y0 + ch + 9;
+
+  // ---------- 2. onde o tempo foi gasto
+  secTit(2, "Onde o tempo foi gasto", "Da abertura até a confirmação: quanto tempo a OS passou em cada etapa (média por OS concluída).");
   if (R.etapas.length) {
-    // gráfico 1: barra empilhada das etapas
-    if (y > 225) { doc.addPage(); y = 18; }
-    doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(...TINTA); doc.text(`Onde o tempo foi gasto · ${R.etapasTotal.n} OS concluídas`, M, y);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(...CINZA); doc.text(`Média por OS: ${fmtMin(R.etapasTotal.media)} da abertura até a confirmação. A soma das etapas é o tempo total.`, M, y + 4.5);
-    let x = M; const BW = W - 2 * M, tot = R.etapasResumo.reduce((s2, e) => s2 + e.media, 0) || 1; y += 7.5;
-    R.etapasResumo.forEach((e, i) => { const w = (e.media / tot) * BW; if (w <= 0) return; doc.setFillColor(...rgb(ETAPA_COR[i])); doc.rect(x, y, w, 8, "F");
-      if (w > 9) { doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(7.5); doc.text(`${e.pct}%`, x + w / 2, y + 5.3, { align: "center" }); } x += w; });
-    y += 12; doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
-    R.etapasResumo.forEach((e, i) => { const cx = M + (i % 3) * (BW / 3), cy = y + Math.floor(i / 3) * 5; doc.setFillColor(...rgb(ETAPA_COR[i])); doc.rect(cx, cy - 2.6, 3, 3, "F");
-      doc.setTextColor(...TINTA); doc.text(`${ETAPA_CURTO[i]} · ${fmtMin(e.media)} (${e.pct}%)`, cx + 4.5, cy); });
-    y += 18;
-    // gráfico 2: tempo do manutentor por atendimento
-    if (R.mntEtapas.length) {
-      if (y + 14 + R.mntEtapas.length * 7 > 280) { doc.addPage(); y = 18; }
-      doc.setFont("helvetica", "bold"); doc.setFontSize(9.5); doc.setTextColor(...TINTA); doc.text("Tempo do manutentor por atendimento (média)", M, y); y += 4;
-      const mx = Math.max(...R.mntEtapas.map((v) => v.serv + v.des + v.mat + v.par), 1), LX = M + 42, LW = BW - 42 - 18;
-      R.mntEtapas.forEach((v) => { doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(...TINTA); doc.text(doc.splitTextToSize(v.nome, 40)[0], M, y + 3.6);
-        let bx = LX; MNT_PARTES.forEach(([k2, , c]) => { const w = (v[k2] / mx) * LW; if (w > 0) { doc.setFillColor(...rgb(c)); doc.rect(bx, y, w, 5, "F"); bx += w; } });
-        doc.setFont("helvetica", "bold"); doc.text(fmtMin(v.serv + v.des + v.mat + v.par), bx + 2, y + 3.6); y += 7; });
-      doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
-      MNT_PARTES.forEach(([, rot, c], i) => { const cx = LX + i * 32; doc.setFillColor(...rgb(c)); doc.rect(cx, y - 0.6, 3, 3, "F"); doc.setTextColor(...TINTA); doc.text(rot, cx + 4.5, y + 2); });
-      y += 10;
-    }
-    secao(`Etapas: média e mediana por OS (${R.etapasTotal.n} OS concluídas)`, ["Etapa", "Quem está com a OS", "Média por OS", "Mediana", "% do total"],
-      [...R.etapasResumo.map((e) => [e.rot, e.quem, fmtMin(e.media), fmtMin(e.mediana), e.pct + "%"]), ["Tempo total (da abertura até a confirmação)", "", fmtMin(R.etapasTotal.media), fmtMin(R.etapasTotal.mediana), "100%"]], { 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" } });
-    secao("Tempo por etapa em cada OS concluída", ["OS", "Onde", "Encaminhar", "Fila", "Desloc.", "Material", "Serviço", "Pausas", "Confirmar", "Total"],
-      R.etapas.map((x) => [osId(x.id), `${nomeN(x.nuc)} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), fmtMin(x.serv), fmtMin(x.par), fmtMin(x.tec), fmtMin(x.total)]), Object.fromEntries([2, 3, 4, 5, 6, 7, 8, 9].map((i) => [i, { halign: "right" }])));
+    cabe(78); const yb = y; cartao(M, y, CW, 74);
+    pilha(M + 4, y + 4, CW - 8, 8, R.etapasResumo.map((e, i) => [e.media, ETAPA_COR[i]]));
+    let cx = M + 4; const tot = R.etapasResumo.reduce((a, e) => a + e.media, 0) || 1;
+    R.etapasResumo.forEach((e) => { const w = (e.media / tot) * (CW - 8); if (w > 9) T(`${e.pct}%`, cx + w / 2, y + 9.4, { s: 7.5, b: true, c: [255, 255, 255], al: "center" }); cx += w; });
+    const maxE = Math.max(1, ...R.etapasResumo.map((e) => e.media));
+    R.etapasResumo.forEach((e, i) => { const yy = y + 19 + i * 7.2; doc.setFillColor(...rgb(ETAPA_COR[i])); doc.rect(M + 4, yy - 2.7, 2.8, 2.8, "F");
+      T(ETAPA_CURTO[i].replace(/ \(.+\)/, ""), M + 9, yy, { s: 8, b: true }); T(e.quem, M + 9, yy + 3, { s: 6.3, c: CINZA });
+      hb(M + 58, yy - 2.2, CW - 112, 2.8, [[e.media / maxE, ETAPA_COR[i]]]); T(fmtMin(e.media), M + CW - 32, yy, { s: 8, b: true, al: "right" }); T(`${e.pct}%`, M + CW - 4, yy, { s: 7.5, c: CINZA, al: "right" }); });
+    y = yb + 74 + 3; T(`Média de ${fmtMin(R.etapasTotal.media)} da abertura até a confirmação, em ${R.etapasTotal.n} OS concluídas. A soma das etapas é o tempo total; nada é contado duas vezes.`, M, y + 2, { s: 7.3, c: CINZA }); y += 10;
+  } else { T("Ainda não há OS concluídas no período. A divisão por etapa aparece quando a OS é confirmada.", M, y + 2, { s: 8, c: CINZA }); y += 10; }
+
+  // ---------- 3. equipe
+  novaPag();
+  secTit(3, "Tempos por responsável", "Média por OS concluída, nas horas úteis de quem estava com a OS (Emergência e Alta: corrido).");
+  if (R.resp.n) { const AR = R.resp, tt = AR.media.total || 1;
+    cabe(30); const bw = CW - 8; cartao(M, y, CW, 22); let bx = M + 4;
+    ["gestor", "manut", "tec"].forEach((kk) => { const w = (AR.media[kk] / tt) * bw; if (w > 0) { doc.setFillColor(...rgb(RESP[kk][2])); doc.rect(bx, y + 4, w, 7, "F"); if (w > 18) T(`${RESP[kk][0]} ${Math.round((AR.media[kk] / tt) * 100)}%`, bx + w / 2, y + 8.9, { s: 7.5, b: true, c: [255, 255, 255], al: "center" }); bx += w; } });
+    T(`Gestor ${fmtMin(AR.media.gestor)}   ·   Manutentor ${fmtMin(AR.media.manut)}   ·   Técnico ${fmtMin(AR.media.tec)}   ·   Total ${fmtMin(AR.media.total)} por OS`, M + 4, y + 17, { s: 8, b: true }); y += 28;
+    tabela("Tempo para direcionar · por gestor", ["Gestor", "OS", "Média", "Mediana"], AR.rk.gestor.map((x) => [x.nome, x.n, fmtMin(x.media), fmtMin(x.mediana)]), dir(1, 2, 3));
+    tabela("Tempo para confirmar · por técnico", ["Técnico (quem abriu)", "OS", "Média", "Mediana"], AR.rk.tec.map((x) => [x.nome, x.n, fmtMin(x.media), fmtMin(x.mediana)]), dir(1, 2, 3));
+    tabela("Tempo com cada manutentor (da OS chegar até finalizar)", ["Manutentor", "OS", "Média na mão", "Fila média", "Mediana"], AR.rk.manut.map((x) => [x.nome, x.n, fmtMin(x.media), fmtMin(x.fila), fmtMin(x.mediana)]), dir(1, 2, 3, 4));
+  } else { T("Sem OS concluídas no período.", M, y + 2, { s: 8, c: CINZA }); y += 10; }
+  novaPag();
+  secTit(4, "Equipe", "Horas de serviço de fato e como o tempo de cada manutentor se divide.");
+  if (R.porMnt.length) {
+    R.porMnt.forEach((l) => { cabe(24); const e = R.mntEtapas.find((x) => x.nome === l[0]); cartao(M, y, CW, 21);
+      T(l[0], M + 4, y + 6.5, { s: 10, b: true }); T(`${l[1]} OS atendidas${l[11] ? ` · ${fmtHoras(l[11])} em apoio` : ""}${l[5] ? ` · ${l[5]} recusa(s)` : ""}${l[6] ? ` · ${l[6]} não resolvida(s)` : ""}`, M + 4, y + 11, { s: 7.3, c: l[5] || l[6] ? VERM : CINZA });
+      [["de serviço", fmtHoras(l[10]), [30, 130, 78]], ["execução média", fmtMin(l[3]), TINTA], ["resposta média", fmtMin(l[4]), TINTA]].forEach(([r, v, c], i) => { const x = M + 88 + i * 31;
+        T(v, x, y + 7, { s: 11, b: true, c }); T(r, x, y + 11, { s: 6.6, c: CINZA }); });
+      if (e) pilha(M + 4, y + 14.5, CW - 8, 3.2, MNT_PARTES.map(([k2, , c]) => [e[k2], c]));
+      y += 24; });
+    legenda(M, y, MNT_PARTES.map(([, rot, c]) => [c, rot]), 30); y += 7;
+    T(`Horas-homem: ${fmtHoras(k.horasHomem)} = ${fmtHoras(k.horas)} dos responsáveis + ${fmtHoras(k.horasApoio || 0)} em apoio + ${fmtHoras(k.horasAj || 0)} dos ajudantes (sem dupla contagem).`, M, y, { s: 7.6, b: true }); y += 7;
+    if (R.porAj.length) tabela("Ajudantes (equipe de apoio)", ["Ajudante", "Atendimentos", "Horas", "Serviço", "Deslocamento", "Material"], R.porAj.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[3]), fmtMin(l[4]), fmtMin(l[5])]), dir(1, 2, 3, 4, 5));
+  } else { T("Nenhum atendimento finalizado no período.", M, y + 2, { s: 8, c: CINZA }); y += 10; }
+
+  // ---------- 4. granjas
+  const G = [...R.porGranja].sort((a, b) => b[1] - a[1]), maxG = Math.max(1, ...G.map((l) => l[1]));
+  secTit(5, "Granjas", "OS abertas e concluídas em cada granja.");
+  cabe(10 + G.length * 6.4); cartao(M, y, CW, 6 + G.length * 6.4 + 2);
+  G.forEach((l, i) => { const yy = y + 7 + i * 6.4; T(l[0], M + 4, yy, { s: 8, b: true });
+    hb(M + 38, yy - 2.3, CW - 92, 2.8, [[l[1] / maxG, "#F3C7C9"], [l[2] / maxG, "#1E8E4E"]]);
+    T(`${l[2]}/${l[1]} · ${l[3]}%`, M + CW - 28, yy, { s: 7.8, b: true, al: "right" }); T(l[4] ? `${l[4]} em aberto` : "concluído", M + CW - 4, yy, { s: 6.8, c: l[4] ? VERM : CINZA, al: "right" }); });
+  y += 6 + G.length * 6.4 + 5; legenda(M, y, [["#1E8E4E", "Concluídas"], ["#F3C7C9", "Em aberto"]], 30); y += 9;
+
+  // ---------- 5. pontos de atenção
+  secTit(6, "Pontos de atenção", "O que ainda está em aberto e o que voltou para o gestor.");
+  tabela(`OS em aberto há mais tempo (${R.pendentes.length})`, ["OS", "Há", "Onde", "Serviço", "Classif.", "Situação", "Manutentor"],
+    R.pendentes.slice(0, 12).map((l) => [l[0], l[8], l[2], l[4], l[5], l[6], l[7]]), { 3: { cellWidth: 52 } });
+  if (R.pendentes.length > 12) { T(`+${R.pendentes.length - 12} OS em aberto no anexo.`, M, y - 4, { s: 7, c: CINZA }); y += 2; }
+  if (R.canceladas.length) tabela(`Canceladas (${R.canceladas.length}) · fora dos indicadores`, ["OS", "Quando", "Por", "Motivo", "Observação"], R.canceladas.slice(0, 10).map((l) => [l[0], l[1], l[2], l[3], l[4]]), { 4: { cellWidth: 50 } });
+  tabela(`Devoluções (${R.devolucoes.length})`, ["OS", "Quando", "Tipo", "Manutentor", "Motivo"], R.devolucoes.slice(0, 10).map((l) => [l[0], l[1], l[2], l[3], l[5] !== "—" ? l[5] : l[4]]), { 4: { cellWidth: 62 } });
+
+  // ---------- anexo
+  novaPag(); doc.setFillColor(...VINHO); doc.rect(M, y - 6, 3, 9, "F"); T("Anexo · dados detalhados", M + 6, y + 0.5, { s: 14, b: true }); T("As mesmas informações do Excel, em tabelas.", M + 6, y + 5.5, { s: 8, c: CINZA }); y += 13;
+  tabela("Por manutentor", ["Manutentor", "OS", "Horas trab.", "Em apoio", "Serviço", "Desloc.", "Material", "Serviço médio", "Resposta", "Recusas", "Não res.", "Parado"],
+    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[11]), fmtHoras(l[10]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), dir(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
+  tabela("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Em aberto", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), dir(1, 2, 3, 4, 5));
+  tabela("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), dir(1, 2, 3, 4, 5));
+  if (R.etapas.length) {
+    tabela("Etapas: média e mediana por OS", ["Etapa", "Quem está com a OS", "Média", "Mediana", "% do total"],
+      [...R.etapasResumo.map((e) => [e.rot, e.quem, fmtMin(e.media), fmtMin(e.mediana), e.pct + "%"]), ["Tempo total (da abertura até a confirmação)", "", fmtMin(R.etapasTotal.media), fmtMin(R.etapasTotal.mediana), "100%"]], dir(2, 3, 4));
+    tabela("Tempo por etapa em cada OS concluída", ["OS", "Onde", "Encaminhar", "Fila", "Desloc.", "Material", "Serviço", "Pausas", "Confirmar", "Total"],
+      R.etapas.map((x) => [osId(x.id), `${nomeN(x.nuc)} · ${localCurto(x.gal)}`, fmtMin(x.ges), fmtMin(x.fila), fmtMin(x.des), fmtMin(x.mat), fmtMin(x.serv), fmtMin(x.par), fmtMin(x.tec), fmtMin(x.total)]), dir(2, 3, 4, 5, 6, 7, 8, 9));
   }
-  if (R.porAj.length) secao(`Ajudantes · ${fmtHoras(k.horasAj)} (total de horas-homem: ${fmtHoras(k.horasHomem)})`, ["Ajudante", "Atendimentos", "Horas", "Serviço", "Deslocamento", "Material"], R.porAj.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[3]), fmtMin(l[4]), fmtMin(l[5])]), num(5));
-  secao("Por manutentor", ["Manutentor", "OS atendidas", "Horas trab.", "Em apoio", "Serviço", "Desloc.", "Material", "Serviço médio", "Resposta média", "Recusas", "Não resolvidas", "Tempo parado"],
-    R.porMnt.map((l) => [l[0], l[1], fmtHoras(l[2]), fmtHoras(l[11]), fmtHoras(l[10]), fmtMin(l[8]), fmtMin(l[9]), fmtMin(l[3]), fmtMin(l[4]), l[5], l[6], fmtMin(l[7])]), num(11));
-  secao("Por granja", ["Granja", "Abertas", "Concluídas", "% finalização", "Não atendidas", "Tempo médio"], R.porGranja.map((l) => [l[0], l[1], l[2], l[3] + "%", l[4], fmtMin(l[5])]), num(5));
-  secao("Por classificação", ["Classificação", "Abertas", "Concluídas", "% finalização", "Até começar", "Lead médio"], R.porPrio.map((l) => [l[0], l[1], l[2], l[3] + "%", fmtMin(l[4]), fmtMin(l[5])]), num(5));
-  secao(`OS não atendidas (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"],
-    R.pendentes.map((l) => [l[0], l[1], l[2], l[4], l[5], l[6], l[7], l[8]]), { 3: { cellWidth: 44 } });
-  if (R.canceladas.length) secao(`Canceladas (${R.canceladas.length}) · fora dos indicadores`, ["OS", "Quando", "Por", "Motivo", "Observação", "Serviço"], R.canceladas, { 4: { cellWidth: 38 }, 5: { cellWidth: 40 } });
-  secao(`Devoluções (${R.devolucoes.length})`, ["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], R.devolucoes, { 4: { cellWidth: 40 }, 5: { cellWidth: 44 } });
-  doc.setFontSize(7.5); doc.setTextColor(...CINZA);
-  doc.text("Horas trabalhadas = registradas no sistema (Iniciar a Finalizar, menos pausas). Percentuais sobre as OS abertas no período.", M, Math.min(y, 285));
+  if (R.pendentes.length > 12) tabela(`Todas as OS em aberto (${R.pendentes.length})`, ["OS", "Aberta em", "Onde", "Serviço", "Classif.", "Situação", "Manutentor", "Há"], R.pendentes.map((l) => [l[0], l[1], l[2], l[4], l[5], l[6], l[7], l[8]]), { 3: { cellWidth: 44 } });
+  if (R.devolucoes.length > 10) tabela(`Todas as devoluções (${R.devolucoes.length})`, ["OS", "Quando", "Tipo", "Manutentor", "Serviço", "Motivo"], R.devolucoes, { 4: { cellWidth: 40 }, 5: { cellWidth: 44 } });
+  cabe(14); T(doc.splitTextToSize("Horas de serviço = execução de fato (Iniciar a Finalizar, sem deslocamento, material e pausas). Horas trabalhadas = serviço + deslocamento + material. Percentuais sobre as OS abertas no período; horas e tempos sobre os atendimentos finalizados no período.", CW), M, y, { s: 7.2, c: CINZA });
+
+  // ---------- rodapé
   const n = doc.getNumberOfPages();
-  for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setDrawColor(230, 230, 226); doc.line(M, 288, W - M, 288); doc.setFontSize(7.5); doc.setTextColor(...CINZA);
-    doc.text(`${C.NOME_EMPRESA} · ${C.NOME_SISTEMA}`, M, 292); doc.text(`Página ${i} de ${n}`, W - M, 292, { align: "right" }); }
+  for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setDrawColor(...LINHA); doc.setLineWidth(0.3); doc.line(M, 287, W - M, 287);
+    T(`${C.NOME_EMPRESA} · Relatório de manutenção das granjas · ${R.rotPer}`, M, 291.5, { s: 7, c: CINZA }); T(`Página ${i} de ${n}`, W - M, 291.5, { s: 7, c: CINZA, al: "right" }); }
   await salvarArquivo(doc.output("blob"), nomeArq("pdf"));
 }
 
@@ -1915,6 +2189,9 @@ async function exportarExcel() {
     ["Tempo total (da abertura até a confirmação)", "", Math.round(R.etapasTotal.media), Math.round(R.etapasTotal.mediana), 1]], [40, 28, 18, 14, 16]);
   aba("Etapas por OS", [["OS", "Granja", "Local", "Atendimentos", "Encaminhar (min)", "Fila (min)", "Deslocamento (min)", "Material (min)", "Serviço (min)", "Pausas (min)", "Confirmar (min)", "Total (min)"],
     ...R.etapas.map((x) => [osId(x.id), nomeN(x.nuc), localCurto(x.gal), x.ciclos, ...["ges", "fila", "des", "mat", "serv", "par", "tec", "total"].map((k) => Math.round(x[k]))])], [10, 16, 18, 13, 16, 11, 18, 14, 13, 12, 15, 11]);
+  aba("Tempos por responsável", [["OS", "Gestor (min)", "Fila (min)", "Deslocamento (min)", "Material (min)", "Serviço (min)", "Pausas (min)", "Manutentor total (min)", "Técnico (min)", "Total (min)", "Corrido? (Emerg./Alta)"],
+    ...R.respOS.map((x) => [osId(x.id), ...["gestor", "fila", "des", "mat", "serv", "par", "manut", "tec", "total"].map((kk) => Math.round(x[kk])), x.urg ? "sim" : "não"])], [10, 12, 10, 16, 13, 12, 12, 20, 12, 11, 20]);
+  aba("Ranking de tempos", [["Papel", "Pessoa", "OS", "Média (min)", "Mediana (min)"], ...["gestor", "tec", "manut"].flatMap((pp) => R.resp.rk[pp].map((x) => [RESP[pp][0], x.nome, x.n, Math.round(x.media), Math.round(x.mediana)]))], [14, 30, 8, 14, 14]);
   aba("Ajudantes", [["Ajudante", "Atendimentos", "Horas (h)", "Serviço (h)", "Deslocamento (h)", "Material (h)"], ...R.porAj.map((l) => [l[0], l[1], ...[2, 3, 4, 5].map((i) => Math.round((l[i] / 60) * 100) / 100)])], [26, 14, 12, 12, 16, 12]);
   aba("Por manutentor", [["Manutentor", "OS atendidas", "Horas trabalhadas (h)", "Horas em apoio (h)", "Horas de serviço (h)", "Deslocamento (h)", "Material (h)", "Serviço médio (min)", "Resposta média (min)", "Recusas", "Não resolvidas", "Tempo parado (h)"],
     ...R.porMnt.map((l) => [l[0], l[1], h(l[2]), h(l[11]), h(l[10]), h(l[8]), h(l[9]), mi(l[3]), mi(l[4]), l[5], l[6], h(l[7])])], [26, 13, 20, 16, 18, 16, 13, 18, 20, 10, 14, 17]);
@@ -1941,10 +2218,11 @@ const lerPeriodo = (p) => faixaPeriodo($(`#${p}Per`).value, $(`#${p}De`).value, 
 
 function viewControles(aba = S.abaCtl || "mat") {
   S.abaCtl = aba;
+  if (aba === "hor") return viewHorarios();
   const mnts = Object.values(S.usuarios).filter((u) => u.perfis.includes("manutentor")).sort((a, b) => a.nome.localeCompare(b.nome));
   const optM = `<option value="">Todos</option>${mnts.map((u) => `<option value="${u.id}">${esc(u.nome)}${u.excluido_em ? " (excluído)" : !u.ativo ? " (bloqueado)" : ""}</option>`).join("")}`;
   $("#view").innerHTML = `<div class="content">
-    <div class="seg" id="cAba">${[["mat", "Materiais dos carros", "box"], ["jor", "Jornada e pausas", "clock"], ["sis", "Sistema", "cog"]].map(([k, r, i]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}</button>`).join("")}</div>
+    <div class="seg" id="cAba">${[["mat", "Materiais dos carros", "box"], ["jor", "Jornada e pausas", "clock"], ["hor", "Horários", "clock"], ["sis", "Sistema", "cog"]].map(([k, r, i]) => `<button data-a="${k}" aria-pressed="${k === aba}">${r}</button>`).join("")}</div>
     ${aba === "sis" ? `<div id="sisOut"><div class="skel"></div></div>` : aba === "mat" ? `
     <section class="card rel-filtros"><div class="rf-grid">
       ${filtroPeriodoHTML("m")}
