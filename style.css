@@ -1226,3 +1226,10 @@ table.rt .linkish { font-size: 13px; }
 }
 .rx-tabs { position: static; scroll-margin-top: 84px; }
 .pane-list .toolbar { flex-wrap: wrap; }
+/* serviço predial (pedreiro) */
+.st.predial { color: #6E5434; background: #F5EEE4; border-color: #E5D6C2; }
+.person.predial { border-style: dashed; }
+.person.predial[aria-checked="true"] { border-style: solid; border-color: #8B6F47; background: #FAF5EE; }
+.av-pred { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: #F5EEE4; color: #8B6F47; flex: none; }
+.av-pred svg.i { width: 18px; height: 18px; }
+.who svg.i { width: 14px; height: 14px; margin-right: 3px; color: #8B6F47; }
