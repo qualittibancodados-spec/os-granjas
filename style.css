@@ -1269,3 +1269,22 @@ table.rt .linkish { font-size: 13px; }
 .mos-t2 tr.ok td { color: var(--muted); }
 .mos.ok .mos-t2 td.mono { text-decoration: line-through; }
 @media (max-width: 860px) { .mos-h { padding: 12px; } .mos-t2 th, .mos-t2 td { padding-left: 12px; padding-right: 12px; } .mat-bar #matCont { margin-left: 0; width: 100%; } }
+/* material: carro e agrupamento por carro */
+.car-tag { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: var(--ink-2); background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; }
+.car-tag svg.i { width: 13px; height: 13px; color: var(--muted); }
+.car-g { display: grid; gap: 10px; margin-bottom: 18px; }
+.car-g h4 { display: flex; align-items: center; gap: 8px; margin: 6px 0 0; font-size: 15px; font-weight: 800; }
+.car-g h4 svg.i { width: 18px; height: 18px; color: var(--brand); }
+.car-g h4 em { font-style: normal; font-size: 12.5px; font-weight: 600; color: var(--muted); margin-left: 6px; }
+#matXls svg.i { width: 15px; height: 15px; }
+/* lançado no sistema dentro da OS + contador da aba Materiais */
+.mat-lan { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 10px 12px; border: 1.5px dashed #E2D3C4; border-radius: 12px; background: #FFFCF8; cursor: pointer; }
+.mat-lan:hover { border-color: #1E8E4E; }
+.mat-lan b { display: block; font-size: 13.5px; } .mat-lan small { font-size: 12px; color: var(--muted); }
+.mat-lan.ok { border-style: solid; border-color: #BFE3CC; background: #F1F9F4; } .mat-lan.ok b { color: #177A42; }
+.seg-cnt { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; margin-left: 6px; border-radius: 999px; background: var(--brand); color: #fff; font-size: 11.5px; font-weight: 800; vertical-align: 1px; }
+.seg-cnt.ok { background: #1E8E4E; } .seg-cnt svg.i { width: 12px; height: 12px; }
+/* caixinha por item no Detalhado */
+.mos-t2 th.ck, .mos-t2 td.ck { width: 64px; text-align: center; padding-left: 10px; padding-right: 4px; }
+.mos-t2 .ckb span { width: 20px; height: 20px; border-radius: 6px; }
+.mos.parcial { border-color: #F1D98C; }

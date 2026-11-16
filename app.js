@@ -5,7 +5,7 @@
    ===================================================================== */
 "use strict";
 const C = window.CONFIG;
-const VERSAO = "8.8";
+const VERSAO = "9.1";
 // Toda chamada ao servidor tem prazo: com sinal fraco, em vez de ficar "carregando" para sempre, avisa e deixa tentar de novo
 function fetchComPrazo(url, opts = {}) {
   const c = new AbortController(), t = setTimeout(() => c.abort(), 20000);
@@ -280,7 +280,7 @@ async function iniciar() {
   if (n.error || g.error) return telaForaDoAr();
   S.nucleos = n.data.map((x) => ({ ...x, galpoes: g.data.filter((y) => y.nucleo_id === x.id).map((y) => y.numero) }));
   S.nucleoPorId = Object.fromEntries(S.nucleos.map((x) => [x.id, x]));
-  S.carros = (c.data || []).filter((x) => x.ativo);
+  S.carros = (c.data || []).filter((x) => x.ativo); S.carroNome = Object.fromEntries((c.data || []).map((x) => [x.codigo, x.nome]));
   S.jornada = j.data || { fim_expediente: "17:00:00", almoco_max_min: 120 };
   MOTIVOS.ALMOCO.lim = S.jornada.almoco_max_min;
   vigiarAcesso();
@@ -838,12 +838,19 @@ async function abrirOS(id) {
   ]);
   const pausas = pzq.data || [];
   const { data: apoios } = await sb.from("os_apoios").select("*").eq("os_id", id).order("id"); S.apoiosOS = apoios || [];
+  // material do carro já lançado no sistema (só quem pode marcar enxerga)
+  S.matLanOS = new Map();
+  if (podeVerTudo() && (at.data || []).some((a) => a.materiais_carro?.length)) { const { data: ml } = await sb.from("materiais_lancados").select("*").eq("os_id", id); (ml || []).forEach((x) => S.matLanOS.set(`${String(x.codigo).toUpperCase()}|${x.unidade}|${x.controle || ""}`, x)); }
   if (os.error) { alvo.innerHTML = `<div class="det"><p class="err">${esc(errMsg(os.error))}</p></div>`; return; }
   alvo.innerHTML = (alvo.id === "pd" ? `<div class="det-bar"><span class="os-id">${osId(id)}</span><button class="icon-btn" data-fechar-det aria-label="Fechar detalhe" title="Fechar (Esc)">${ic("x")}</button></div>` : "")
     + detalheHTML(os.data, hist.data, at.data, lead.data, pausas);
   alvo.onclick = (e) => {
     if (e.target.closest("[data-fechar-det]")) return fecharDetalhe();
     const a = e.target.closest("[data-acao]"); if (a) executar(a.dataset.acao, id, a); };
+  $$("[data-mat-os]", alvo).forEach((cb) => (cb.onchange = async () => { const atd = (at.data || []).find((x) => x.id === +cb.dataset.matAt); if (!atd) return; cb.disabled = true;
+    const itens = atd.materiais_carro.map((m) => ({ os_id: id, codigo: m.codigo, unidade: m.unidade, controle: m.controle || "" }));
+    try { await rpc("marcar_material_lancado", { p_itens: itens, p_lancado: cb.checked }); toast(cb.checked ? `${osId(id)}: material marcado como lançado.` : `${osId(id)}: marcação desfeita.`); if (S.matPainel) S.matPainel.sujo = true; abrirOS(id); }
+    catch (e) { cb.checked = !cb.checked; cb.disabled = false; toast(errMsg(e), true); } }));
   $$(".tabs button", alvo).forEach((b) => (b.onclick = () => {
     $$(".tabs button", alvo).forEach((x) => x.setAttribute("aria-selected", x === b));
     $$("[data-tab]", alvo).forEach((p) => (p.hidden = p.dataset.tab !== b.dataset.t));
@@ -892,6 +899,14 @@ function proximoPasso(o) {
   const alt = (tem("gerente") || tem("admin")) && o.prioridade && !["CONCLUÍDA", "CANCELADA"].includes(o.status) ? `<div class="row">${b("classificar", "Alterar classificação", "btn-sm")}</div>` : "";
   return `<div class="next"><div class="next-h">${ic(o.pausada_em ? "pause" : STATUS[o.status].i)}${o.pausada_em ? "Pausada" : STATUS[o.status].rot}</div><p${alt ? "" : ' style="margin-bottom:0"'}>${info}</p>${alt}</div>`;
 }
+// caixinha "lançado no sistema" do material do carro, dentro da OS (admin, gestor e gerente)
+function matLanBox(o, a) {
+  if (!podeVerTudo() || !a.materiais_carro?.length) return "";
+  const its = a.materiais_carro, lan = S.matLanOS || new Map(), ks = its.map((m) => `${String(m.codigo).toUpperCase()}|${m.unidade}|${m.controle || ""}`), n = ks.filter((k) => lan.has(k)).length, ok = n === ks.length;
+  const ult = ks.map((k) => lan.get(k)).filter(Boolean).sort((x, y) => new Date(y.lancado_em) - new Date(x.lancado_em))[0];
+  return `<label class="mat-lan${ok ? " ok" : ""}"><span class="ckb"><input type="checkbox" data-mat-os="${o.id}" data-mat-at="${a.id}" ${ok ? "checked" : ""}><span></span></span>
+    <span><b>${ok ? "Lançado no sistema" : n ? `Lançado em parte (${n} de ${ks.length} itens)` : "Marcar como lançado no sistema"}</b><small>${ok ? `por ${esc(nomeU(ult?.lancado_por))} em ${fmtDH(ult?.lancado_em)}` : "dá baixa de todos os itens deste atendimento"}</small></span></label>`;
+}
 function detalheHTML(o, hist, at, lead, pausas = []) {
   const T = ["ABERTA", "DIRECIONADA", "EM ATENDIMENTO", "AGUARDANDO CONFIRMAÇÃO", "CONCLUÍDA"], TR = ["Aberta", "Direcionada", "Atendimento", "Confirmação", "Concluída"];
   const quando = [o.aberta_em, o.direcionada_em, o.iniciada_em, o.finalizada_em, o.confirmada_em];
@@ -912,7 +927,7 @@ function detalheHTML(o, hist, at, lead, pausas = []) {
         <ul class="mats">${pz.map((p) => `<li><span>${ic(MOTIVOS[p.motivo].i)} ${MOTIVOS[p.motivo].rot}${p.detalhe ? `<small class="muted">${esc(p.detalhe)}</small>` : ""}</span><b>${p.fim ? fmtMin((new Date(p.fim) - new Date(p.inicio)) / 6e4) : ehEtapa(p.motivo) ? "agora" : "em pausa"}</b></li>`).join("")}</ul></div>`; })()}
     ${a.motivo_recusa ? `<div class="kv"><b>Motivo da recusa</b><p>${esc(a.motivo_recusa)}</p></div>` : ""}
     ${a.servico_realizado ? `<div class="kv"><b>O que foi feito</b><p>${esc(a.servico_realizado)}</p></div>` : ""}
-    ${a.finalizada_em ? `<div class="kv"><b>Material do estoque do carro${a.materiais_carro?.[0]?.almoxarifado ? ` · carro ${a.materiais_carro[0].almoxarifado}` : ""}</b>${a.materiais_carro?.length ? `<ul class="mats">${a.materiais_carro.map((m) => `<li><span>${esc(m.material)}<small class="muted mono">${esc(m.codigo)}${m.controle ? ` · ${esc(m.controle)}` : ""}</small></span><b>${m.quantidade} ${esc(m.unidade)}</b></li>`).join("")}</ul>` : `<p class="muted">Não usou</p>`}</div>` : ""}
+    ${a.finalizada_em ? `<div class="kv"><b>Material do estoque do carro${a.materiais_carro?.[0]?.almoxarifado ? ` · carro ${a.materiais_carro[0].almoxarifado}` : ""}</b>${a.materiais_carro?.length ? `<ul class="mats">${a.materiais_carro.map((m) => `<li><span>${esc(m.material)}<small class="muted mono">${esc(m.codigo)}${m.controle ? ` · ${esc(m.controle)}` : ""}</small></span><b>${m.quantidade} ${esc(m.unidade)}</b></li>`).join("")}</ul>${matLanBox(o, a)}` : `<p class="muted">Não usou</p>`}</div>` : ""}
   </div>`).join("");
   const EVI = { "OS aberta": "inbox", "Direcionada": "send", "Redirecionada após pendência": "send", "Atendimento iniciado": "play", "Atendimento finalizado": "flag",
     "Serviço confirmado pelo técnico": "checkc", "Técnico informou que não foi resolvido": "undo", "Recusada pelo manutentor": "undo", "Classificação alterada": "alert", "Atendimento pausado": "pause", "Atendimento retomado": "play" };
@@ -1334,9 +1349,10 @@ async function viewPainel() {
       ${card2("Aviários com mais OS", "Em laranja: 2 ou mais OS no período (problema que se repete).", "gAv")}
       ${card2("OS por local ou equipamento", "Quantidade no período · lead típico das concluídas.", "gEq", true)}</div></div>
     <div data-v="mat" hidden><section class="card"><h3>${ic("box")} Material do estoque dos carros</h3><p class="muted">Cada OS com os itens e o destino (granja e aviário). Material do almoxarifado não entra aqui. Marque <b>Lançado</b> quando já tiver dado baixa no sistema.</p>
-      <div class="mat-bar"><div class="seg" id="matVis"></div><div class="seg" id="matF">${[["falta", "Falta lançar"], ["ok", "Lançados"], ["todos", "Todos"]].map(([k, r]) => `<button data-f="${k}" aria-pressed="${k === (S.matFiltro || "falta")}">${r}</button>`).join("")}</div><span id="matCont" class="muted"></span></div>
+      <div class="mat-bar"><div class="seg" id="matVis"></div><button class="btn btn-sm" id="matXls">${ic("download")}Exportar Excel</button><div class="seg" id="matF">${[["falta", "Falta lançar"], ["ok", "Lançados"], ["todos", "Todos"]].map(([k, r]) => `<button data-f="${k}" aria-pressed="${k === (S.matFiltro || "falta")}">${r}</button>`).join("")}</div><span id="matCont" class="muted"></span></div>
       <div id="gMat"></div></section></div>
   </div>`;
+  $("#matXls").onclick = (e) => busy(e.currentTarget, exportarMateriais);
   $("#matVis").onclick = (e) => { const b = e.target.closest("[data-v2]"); if (!b) return; S.matVisao = b.dataset.v2; desenharMateriais(); };
   $("#matF").onclick = (e) => { const b = e.target.closest("[data-f]"); if (!b) return; S.matFiltro = b.dataset.f; $$("#matF button").forEach((x) => x.setAttribute("aria-pressed", x === b)); desenharMateriais(); };
   $("#pSeg").onclick = (e) => { const b = e.target.closest("[data-v]"); if (!b) return; $$("#pSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); $$("#view [data-v]:not(button)").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v)); };
@@ -1461,52 +1477,101 @@ async function carregarPainel() {
 
   // materiais
   const mt = {}; L.forEach((r) => (r.materiais_carro || []).forEach((m) => { const k = `${String(m.codigo).toUpperCase()}|${m.unidade}`;
-    (mt[k] ??= { c: m.codigo, n: m.material, u: m.unidade, q: 0, os: new Set(), locais: {} }).q += +m.quantidade; mt[k].os.add(r.id);
+    (mt[k] ??= { c: m.codigo, n: m.material, u: m.unidade, q: 0, os: new Set(), pares: [], locais: {} }).q += +m.quantidade; mt[k].os.add(r.id); mt[k].pares.push({ os: r.id, ctl: m.controle || "" });
     const lc = (mt[k].locais[r.nucleo_id] ??= { todo: false, av: new Set() }); if (!(r.galpoes || []).length) lc.todo = true; (r.galpoes || []).forEach((x) => lc.av.add(x)); }));
   const lm = Object.values(mt).sort((a, b) => b.os.size - a.os.size);
   // o que já foi lançado no sistema (por OS + código)
   const porOS = L.filter((r) => (r.materiais_carro || []).length).sort((a, b) => a.id - b.id)
     .map((r) => ({ id: r.id, nuc: r.nucleo_id, gal: r.galpoes || [], eq: r.equipamento, mnt: r.manutentor_id, status: r.status, data: r.confirmada_em || r.aberta_em,
-      itens: r.materiais_carro.map((m) => ({ c: m.codigo, n: m.material, q: +m.quantidade, u: m.unidade })) }));
+      itens: r.materiais_carro.map((m) => ({ c: m.codigo, n: m.material, q: +m.quantidade, u: m.unidade, ctl: m.controle || "", car: m.almoxarifado ?? null })) }));
   const idsMat = porOS.map((o) => o.id);
-  const { data: lan } = idsMat.length ? await todas(sb.from("materiais_lancados").select("os_id,codigo,unidade,lancado_em,lancado_por").in("os_id", idsMat.slice(0, 1000))) : { data: [] };
+  const { data: lan } = idsMat.length ? await todas(sb.from("materiais_lancados").select("os_id,codigo,unidade,controle,lancado_em,lancado_por").in("os_id", idsMat.slice(0, 1000))) : { data: [] };
   if (tok !== S.tok) return;
-  S.matPainel = { lm, porOS, lan: new Map((lan || []).map((x) => [`${x.os_id}|${String(x.codigo).toUpperCase()}|${x.unidade}`, x])) };
+  S.matPainel = { lm, porOS, lan: new Map((lan || []).map((x) => [chaveLan(x), x])) };
   desenharMateriais();
 }
-const chaveMat = (os, m) => `${os}|${String(m.c).toUpperCase()}|${m.u}`;
+const chaveMat = (os, m) => `${os}|${String(m.c).toUpperCase()}|${m.u}|${m.ctl || ""}`;
+const chaveLan = (x) => `${x.os_id}|${String(x.codigo).toUpperCase()}|${x.unidade}|${x.controle || ""}`;
+const itemLan = (os, m) => ({ os_id: os, codigo: m.c, unidade: m.u, controle: m.ctl || "" });
+const nomeCarro = (c) => { if (c == null) return "Carro não informado"; const n = S.carroNome?.[c]; return !n || n === String(c) ? `Carro ${c}` : n.includes(String(c)) ? n : `${c} · ${n}`; };
+const carrosDe = (o) => [...new Set(o.itens.map((m) => m.car))];
+// Excel do material dos carros: Detalhado (por OS), Por carro e Itens (lista para filtrar)
+async function exportarMateriais() {
+  const M = S.matPainel; if (!M?.porOS?.length) return toast("Nenhuma OS com material de carro no período.", true);
+  await carregarScript("xlsx.mini.min.js", () => window.XLSX);
+  const X = window.XLSX, wb = X.utils.book_new(), lan = M.lan, per = $("#pPer").selectedOptions[0]?.textContent || "", nuc = $("#pNuc").selectedOptions[0]?.textContent || "";
+  const ok = (os, m) => lan.has(chaveMat(os, m)), estO = (os, its) => { const n = its.filter((m) => ok(os, m)).length; return n === its.length ? "✓" : n ? "parcial" : ""; };
+  const quem = (os, its) => { const u = its.map((m) => lan.get(chaveMat(os, m))).filter(Boolean).sort((a, b) => new Date(b.lancado_em) - new Date(a.lancado_em))[0]; return u ? `${nomeU(u.lancado_por)} · ${fmtDH(u.lancado_em)}` : ""; };
+  const cab = [["Material do estoque dos carros"], [`${C.NOME_EMPRESA} · ${per} · ${nuc}`], [`Gerado em ${new Date().toLocaleString("pt-BR", { timeZone: TZ })} por ${S.eu.nome}`], []];
+  const aba = (nome, linhas, larg, filtro) => { const ws = X.utils.aoa_to_sheet(linhas); ws["!cols"] = larg.map((w) => ({ wch: w })); if (filtro) ws["!autofilter"] = { ref: filtro }; X.utils.book_append_sheet(wb, ws, nome); };
+  const blocoOS = (o, its) => [[`${osId(o.id)}`, `Lançado: ${estO(o.id, its) || "não"}`, `${nomeN(o.nuc)} · ${localCurto(o.gal)}`, o.eq || "", o.mnt ? nomeU(o.mnt) : "", dataBR(new Date(o.data)), [...new Set(its.map((m) => nomeCarro(m.car)))].join(", "), quem(o.id, its)],
+    ...its.map((m) => ["", ok(o.id, m) ? "✓" : "", m.c, m.n, m.ctl, m.q, m.u]), []];
+  const det = [...cab, ["OS", "Lançado", "Destino (granja · aviário) / Código", "Equipamento / Produto", "Manutentor / Controle", "Data / Quantidade", "Carro / Unidade", "Lançado por"], []];
+  M.porOS.forEach((o) => det.push(...blocoOS(o, o.itens)));
+  aba("Detalhado", det, [11, 12, 34, 30, 22, 14, 18, 26]);
+  const grupos = {}; M.porOS.forEach((o) => carrosDe(o).forEach((c) => (grupos[c ?? "—"] ??= { car: c, lista: [] }).lista.push({ o, its: o.itens.filter((m) => m.car === c) })));
+  const pc = [...cab];
+  Object.values(grupos).sort((a, b) => (a.car ?? 1e9) - (b.car ?? 1e9)).forEach((g) => {
+    pc.push([nomeCarro(g.car).toUpperCase(), `${g.lista.length} OS`, `${g.lista.filter((x) => estO(x.o.id, x.its) === "✓").length} lançada(s)`], ["OS", "Lançado", "Destino / Código", "Equipamento / Produto", "Manutentor / Controle", "Data / Quantidade", "Carro / Unidade", "Lançado por"]);
+    g.lista.forEach((x) => pc.push(...blocoOS(x.o, x.its)));
+    const soma = {}; g.lista.forEach((x) => x.its.forEach((m) => { const k = `${String(m.c).toUpperCase()}|${m.u}`; (soma[k] ??= { c: m.c, n: m.n, u: m.u, q: 0 }).q += m.q; }));
+    pc.push([`Total do ${nomeCarro(g.car)}`], ...Object.values(soma).sort((a, b) => String(a.c).localeCompare(String(b.c))).map((t) => ["", "", t.c, t.n, "", t.q, t.u]), [], []); });
+  aba("Por carro", pc, [11, 12, 34, 30, 22, 14, 18, 26]);
+  const lista = [["Lançado", "OS", "Data", "Granja", "Aviários", "Equipamento", "Manutentor", "Carro", "Código", "Produto", "Controle", "Quantidade", "Unidade", "Lançado por"]];
+  M.porOS.forEach((o) => o.itens.forEach((m) => lista.push([ok(o.id, m) ? "✓" : "", osId(o.id), dataBR(new Date(o.data)), nomeN(o.nuc), localCurto(o.gal), o.eq || "", o.mnt ? nomeU(o.mnt) : "", nomeCarro(m.car), m.c, m.n, m.ctl, m.q, m.u, quem(o.id, [m])])));
+  aba("Itens (lista)", lista, [9, 10, 11, 14, 16, 22, 18, 18, 10, 30, 12, 11, 9, 26], `A1:N${lista.length}`);
+  await salvarArquivo(new Blob([X.write(wb, { bookType: "xlsx", type: "array" })], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `material-carros_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
 function desenharMateriais() {
   const { lm, porOS = [], lan } = S.matPainel || { lm: [], porOS: [], lan: new Map() }, f = S.matFiltro || "falta", vis0 = S.matVisao || "os";
   const filtrar = (lst, est) => lst.filter((x) => f === "todos" || (f === "ok" ? est(x) === "ok" : est(x) !== "ok"));
   const marcar = async (cb, itens, rotulo) => { cb.disabled = true;
     try { await rpc("marcar_material_lancado", { p_itens: itens, p_lancado: cb.checked });
-      itens.forEach((x) => { const k = `${x.os_id}|${String(x.codigo).toUpperCase()}|${x.unidade}`; if (cb.checked) lan.set(k, { ...x, lancado_em: new Date().toISOString(), lancado_por: S.eu.id }); else lan.delete(k); });
+      itens.forEach((x) => { const k = chaveLan(x); if (cb.checked) lan.set(k, { ...x, lancado_em: new Date().toISOString(), lancado_por: S.eu.id }); else lan.delete(k); });
       toast(cb.checked ? `${rotulo}: marcado como lançado.` : `${rotulo}: desmarcado.`); desenharMateriais();
     } catch (e) { cb.checked = !cb.checked; cb.disabled = false; toast(errMsg(e), true); } };
   const ck = (attr, ok, titulo) => `<label class="ckb" title="${titulo}"><input type="checkbox" ${attr} ${ok ? "checked" : ""}><span></span></label>`;
-  $("#matVis").innerHTML = [["os", "Por OS"], ["cod", "Somado por código"]].map(([k, r]) => `<button data-v2="${k}" aria-pressed="${k === vis0}">${r}</button>`).join("");
-  if (vis0 === "os") {   // ---------- uma OS por bloco (mais fácil de lançar)
+  { const pend = porOS.filter((o) => o.itens.some((m) => !lan.has(chaveMat(o.id, m)))).length, bt = $("#pSeg [data-v=mat]");
+    if (bt) bt.innerHTML = `Materiais${pend ? ` <b class="seg-cnt" title="OS com material para lançar">${pend}</b>` : ` <b class="seg-cnt ok">${ic("check")}</b>`}`; }
+  $("#matVis").innerHTML = [["os", "Detalhado"], ["carro", "Por carro"], ["cod", "Somado por código"]].map(([k, r]) => `<button data-v2="${k}" aria-pressed="${k === vis0}">${r}</button>`).join("");
+  // bloco de uma OS (Detalhado e Por carro): itens, destino, carro e a caixinha "Lançado"
+  const estItens = (os, itens) => { const n = itens.filter((m) => lan.has(chaveMat(os, m))).length; return n === itens.length ? "ok" : n ? "parcial" : "falta"; };
+  const bloco = (o, itens, chaveCk) => { const e = estItens(o.id, itens), ult = itens.map((m) => lan.get(chaveMat(o.id, m))).filter(Boolean).sort((a, b) => new Date(b.lancado_em) - new Date(a.lancado_em))[0], temCtl = itens.some((m) => m.ctl), cars = [...new Set(itens.map((m) => m.car))];
+    return `<article class="mos ${e}"><header class="mos-h">${ck(`data-mos="${chaveCk}"`, e === "ok", e === "ok" ? `Lançado por ${esc(nomeU(ult?.lancado_por))} em ${fmtDH(ult?.lancado_em)}` : "Marcar como lançada")}
+      <div class="mos-t"><button class="os-chip${e === "ok" ? " ok" : ""}" data-os-mat="${o.id}">${osId(o.id)}</button><b>${esc(nomeN(o.nuc))}</b><span>${localCurto(o.gal)}</span>${o.eq ? `<span class="muted">· ${esc(o.eq)}</span>` : ""}</div>
+      <div class="mos-m">${cars.map((c) => `<span class="car-tag">${ic("truck")}${esc(nomeCarro(c))}</span>`).join("")}<span>${o.mnt ? esc(nomeU(o.mnt)) : "—"}</span><span>${dataBR(new Date(o.data))}</span>${e === "ok" ? `<span class="tag ok">${ic("check")}Lançada</span>` : e === "parcial" ? `<span class="tag">parcial</span>` : ""}</div></header>
+      <table class="mos-t2"><thead><tr><th class="ck">Lançado</th><th>Código</th><th>Produto</th>${temCtl ? "<th>Controle</th>" : ""}<th class="n">Quantidade</th></tr></thead><tbody>${itens.map((m) => `<tr class="${lan.has(chaveMat(o.id, m)) ? "ok" : ""}"><td class="ck">${ck(`data-mit="${esc(chaveMat(o.id, m))}"`, lan.has(chaveMat(o.id, m)), lan.has(chaveMat(o.id, m)) ? `Lançado por ${esc(nomeU(lan.get(chaveMat(o.id, m))?.lancado_por))} em ${fmtDH(lan.get(chaveMat(o.id, m))?.lancado_em)}` : "Marcar este item como lançado")}</td><td class="mono">${esc(m.c)}</td><td>${esc(m.n)}</td>${temCtl ? `<td class="mono">${esc(m.ctl)}</td>` : ""}<td class="n"><b>${m.q.toLocaleString("pt-BR")}</b> ${esc(m.u)}</td></tr>`).join("")}</tbody></table></article>`; };
+  if (vis0 === "carro") {   // ---------- agrupado por carro (cada OS aparece no carro de onde saiu o material)
+    const grupos = {}; porOS.forEach((o) => carrosDe(o).forEach((c) => (grupos[c ?? "—"] ??= { car: c, lista: [] }).lista.push({ o, itens: o.itens.filter((m) => m.car === c) })));
+    const gs = Object.values(grupos).sort((a, b) => (a.car ?? 1e9) - (b.car ?? 1e9)), todos = gs.flatMap((g) => g.lista), okN = todos.filter((x) => estItens(x.o.id, x.itens) === "ok").length;
+    $("#matCont").innerHTML = todos.length ? `<b>${okN}</b> de ${todos.length} lançadas` : "";
+    const html = gs.map((g) => { const lst = g.lista.filter((x) => f === "todos" || (f === "ok" ? estItens(x.o.id, x.itens) === "ok" : estItens(x.o.id, x.itens) !== "ok")); if (!lst.length) return "";
+      const ok = g.lista.filter((x) => estItens(x.o.id, x.itens) === "ok").length;
+      return `<section class="car-g"><h4>${ic("truck")}${esc(nomeCarro(g.car))}<em>${g.lista.length} OS · ${ok} lançada(s)</em></h4><div class="mos-lista">${lst.map((x) => bloco(x.o, x.itens, `${x.o.id}|${g.car ?? ""}`)).join("")}</div></section>`; }).join("");
+    $("#gMat").innerHTML = !porOS.length ? `<div class="zero">Nenhuma OS com material de carro no período.</div>` : html || `<div class="zero">${f === "ok" ? "Nada lançado ainda." : "Tudo lançado no período. 👍"}</div>`;
+    $$("#gMat [data-mos]").forEach((cb) => (cb.onchange = () => { const [id, car] = cb.dataset.mos.split("|"), o = porOS.find((x) => x.id === +id); if (!o) return;
+      const its = o.itens.filter((m) => String(m.car ?? "") === car); marcar(cb, its.map((m) => itemLan(o.id, m)), `${osId(o.id)} (${nomeCarro(its[0]?.car)})`); }));
+  } else if (vis0 === "os") {   // ---------- Detalhado: uma OS por bloco (mais fácil de lançar)
     const estOS = (o) => { const n = o.itens.filter((m) => lan.has(chaveMat(o.id, m))).length; return n === o.itens.length ? "ok" : n ? "parcial" : "falta"; };
     const okN = porOS.filter((o) => estOS(o) === "ok").length, vis = filtrar(porOS, estOS);
     $("#matCont").innerHTML = porOS.length ? `<b>${okN}</b> de ${porOS.length} OS lançadas` : "";
     $("#gMat").innerHTML = !porOS.length ? `<div class="zero">Nenhuma OS com material de carro no período.</div>` : !vis.length ? `<div class="zero">${f === "ok" ? "Nenhuma OS lançada ainda." : "Tudo lançado no período. 👍"}</div>`
-      : `<div class="mos-lista">${vis.map((o) => { const e = estOS(o), ult = o.itens.map((m) => lan.get(chaveMat(o.id, m))).filter(Boolean).sort((a, b) => new Date(b.lancado_em) - new Date(a.lancado_em))[0];
-        return `<article class="mos ${e}"><header class="mos-h">${ck(`data-mos="${o.id}"`, e === "ok", e === "ok" ? `Lançado por ${esc(nomeU(ult?.lancado_por))} em ${fmtDH(ult?.lancado_em)}` : "Marcar a OS inteira como lançada")}
-          <div class="mos-t"><button class="os-chip${e === "ok" ? " ok" : ""}" data-os-mat="${o.id}">${osId(o.id)}</button><b>${esc(nomeN(o.nuc))}</b><span>${localCurto(o.gal)}</span>${o.eq ? `<span class="muted">· ${esc(o.eq)}</span>` : ""}</div>
-          <div class="mos-m"><span>${o.mnt ? esc(nomeU(o.mnt)) : "—"}</span><span>${dataBR(new Date(o.data))}</span>${e === "ok" ? `<span class="tag ok">${ic("check")}Lançada</span>` : e === "parcial" ? `<span class="tag">parcial</span>` : ""}</div></header>
-          <table class="mos-t2"><thead><tr><th>Código</th><th>Produto</th><th class="n">Quantidade</th></tr></thead><tbody>${o.itens.map((m) => `<tr class="${lan.has(chaveMat(o.id, m)) ? "ok" : ""}"><td class="mono">${esc(m.c)}</td><td>${esc(m.n)}</td><td class="n"><b>${m.q.toLocaleString("pt-BR")}</b> ${esc(m.u)}</td></tr>`).join("")}</tbody></table></article>`; }).join("")}</div>`;
-    $$("#gMat [data-mos]").forEach((cb) => (cb.onchange = () => { const o = porOS.find((x) => x.id === +cb.dataset.mos); if (o) marcar(cb, o.itens.map((m) => ({ os_id: o.id, codigo: m.c, unidade: m.u })), osId(o.id)); }));
+      : `<div class="mos-lista">${vis.map((o) => bloco(o, o.itens, o.id)).join("")}</div>`;
+    $$("#gMat [data-mos]").forEach((cb) => (cb.onchange = () => { const o = porOS.find((x) => x.id === +cb.dataset.mos); if (o) marcar(cb, o.itens.map((m) => itemLan(o.id, m)), osId(o.id)); }));
   } else {   // ---------- somado por código (conferência)
-    const est = (m) => { const n = [...m.os].filter((os) => lan.has(chaveMat(os, m))).length; return n === m.os.size ? "ok" : n ? "parcial" : "falta"; };
+    const pOk = (m, p) => lan.has(chaveMat(p.os, { ...m, ctl: p.ctl })), osOk = (m, os) => m.pares.filter((p) => p.os === os).every((p) => pOk(m, p));
+    const est = (m) => { const n = m.pares.filter((p) => pOk(m, p)).length; return n === m.pares.length ? "ok" : n ? "parcial" : "falta"; };
     const okN = lm.filter((m) => est(m) === "ok").length, vis = filtrar(lm, est);
     $("#matCont").innerHTML = lm.length ? `<b>${okN}</b> de ${lm.length} itens lançados` : "";
     $("#gMat").innerHTML = !lm.length ? `<div class="zero">Nenhum material de carro no período.</div>` : !vis.length ? `<div class="zero">${f === "ok" ? "Nenhum item lançado ainda." : "Tudo lançado no período. 👍"}</div>`
       : `<div class="tbl"><table class="t mat-t"><thead><tr><th class="ck">Lançado</th><th>Código</th><th>Produto</th><th class="n">Quantidade</th><th>Onde foi usado (granja / aviário)</th><th>OS</th></tr></thead>
       <tbody>${vis.map((m) => { const e = est(m); return `<tr class="${e}"><td class="ck">${ck(`data-mat="${esc(m.c)}|${esc(m.u)}"`, e === "ok", "Marcar em todas as OS desta linha")}${e === "parcial" ? `<small class="parc">parcial</small>` : ""}</td>
         <td class="mono">${esc(m.c)}</td><td>${esc(m.n)}</td><td class="n">${m.q.toLocaleString("pt-BR")} ${esc(m.u)}</td><td style="white-space:normal;min-width:180px">${esc(ondeTexto(m.locais))}</td>
-        <td class="os-chips">${[...m.os].sort((a, b) => a - b).map((os) => `<button class="os-chip${lan.has(chaveMat(os, m)) ? " ok" : ""}" data-os-mat="${os}">${osId(os)}</button>`).join("")}</td></tr>`; }).join("")}</tbody></table></div>`;
-    $$("#gMat [data-mat]").forEach((cb) => (cb.onchange = () => { const [c, u] = cb.dataset.mat.split("|"), m = lm.find((x) => x.c === c && x.u === u); if (m) marcar(cb, [...m.os].map((os) => ({ os_id: os, codigo: m.c, unidade: m.u })), `${m.c} · ${m.n}`); }));
+        <td class="os-chips">${[...m.os].sort((a, b) => a - b).map((os) => `<button class="os-chip${osOk(m, os) ? " ok" : ""}" data-os-mat="${os}">${osId(os)}</button>`).join("")}</td></tr>`; }).join("")}</tbody></table></div>`;
+    $$("#gMat [data-mat]").forEach((cb) => (cb.onchange = () => { const [c, u] = cb.dataset.mat.split("|"), m = lm.find((x) => x.c === c && x.u === u); if (m) marcar(cb, m.pares.map((p) => itemLan(p.os, { ...m, ctl: p.ctl })), `${m.c} · ${m.n}`); }));
   }
+  $$("#gMat [data-mit]").forEach((cb) => (cb.onchange = () => { const chave = cb.dataset.mit, os = chave.split("|")[0], o = porOS.find((x) => x.id === +os), m = o?.itens.find((x) => chaveMat(o.id, x) === chave);
+    if (m) marcar(cb, [itemLan(o.id, m)], `${osId(o.id)} · ${m.c} ${m.n}${m.ctl ? ` (${m.ctl})` : ""}`); }));
   $$("#gMat [data-os-mat]").forEach((b) => (b.onclick = () => abrirOS(+b.dataset.osMat)));
 }
 
